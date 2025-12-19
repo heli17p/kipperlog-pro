@@ -1,0 +1,7 @@
+{
+  "name": "KipperLog Pro",
+  "description": "Eine professionelle Anwendung für LKW-Kipper-Fahrer zur Verfolgung von Fuhren, Baustellen und Materialvolumen (10m³ / 12m³).",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
