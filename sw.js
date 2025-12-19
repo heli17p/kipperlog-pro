@@ -1,13 +1,9 @@
 
-const CACHE_NAME = 'kipperlog-v2';
+const CACHE_NAME = 'kipperlog-v3';
 const ASSETS = [
-  './',
-  './index.html',
-  './index.tsx',
-  './App.tsx',
-  './types.ts',
-  './constants.tsx',
-  './manifest.json',
+  '/',
+  '/index.html',
+  '/manifest.json',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
   'https://cdn.tailwindcss.com',
