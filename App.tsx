@@ -8,6 +8,7 @@ const LOADING_ZONE_RADIUS = 25;
 const DEFAULT_SITE_RADIUS = 200; 
 const DETECTION_DELAY_MS = 5000; 
 const RESET_COOLDOWN_MS = 3000; 
+const ACCURACY_THRESHOLD = 50; // Meter: Signale ungenauer als 50m werden für die Automatik ignoriert
 
 const DEFAULT_MATERIALS: CustomMaterial[] = [
   { id: '1', name: 'Aushub', colorClass: 'bg-amber-600' },
@@ -41,7 +42,7 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'track' | 'history' | 'stats' | 'settings'>('track');
-  const [currentCoords, setCurrentCoords] = useState<{lat: number, lon: number} | null>(null);
+  const [currentCoords, setCurrentCoords] = useState<{lat: number, lon: number, accuracy: number} | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [gpsRetryKey, setGpsRetryKey] = useState<number>(0); 
   const [activeAutoLoadId, setActiveAutoLoadId] = useState<string | null>(null);
@@ -164,7 +165,11 @@ const App: React.FC = () => {
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocationError(null);
-        const coords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        const coords = { 
+          lat: pos.coords.latitude, 
+          lon: pos.coords.longitude,
+          accuracy: pos.coords.accuracy 
+        };
         setCurrentCoords(coords);
         if (mapRef.current && autoCenter && activeTab === 'track') {
           mapRef.current.setView([coords.lat, coords.lon], mapRef.current.getZoom());
@@ -199,10 +204,9 @@ const App: React.FC = () => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     
-    // Montag der aktuellen Woche finden
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+    const startOfWeek = new Date(new Date(now).setDate(diff)).setHours(0,0,0,0);
     
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
     const startOfYear = new Date(now.getFullYear(), 0, 1).getTime();
@@ -575,7 +579,8 @@ const App: React.FC = () => {
   }, [activeAutoLoadId]);
 
   useEffect(() => {
-    if (!currentCoords || !state.autoCountEnabled) return;
+    // Wenn Genauigkeit zu schlecht ist (GPS Drift), Automatik überspringen
+    if (!currentCoords || !state.autoCountEnabled || currentCoords.accuracy > ACCURACY_THRESHOLD) return;
     
     let detectedPoint: { p: LoadingPoint, s: Site } | null = null;
     
@@ -644,7 +649,7 @@ const App: React.FC = () => {
     
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+    const startOfWeek = new Date(new Date(now).setDate(diff)).setHours(0,0,0,0);
 
     return sortedLoads.filter(load => {
       if (historyFilter === 'all') return true;
@@ -661,7 +666,7 @@ const App: React.FC = () => {
     
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+    const startOfWeek = new Date(new Date(now).setDate(diff)).setHours(0,0,0,0);
 
     const filterFn = (load: Load) => {
       if (statsFilter === 'all') return true;
@@ -889,6 +894,17 @@ const App: React.FC = () => {
             <div className="absolute inset-0 z-[10]">
               <div ref={mapContainerRef} className="h-full w-full"></div>
             </div>
+
+            {/* GPS GENAUIGKEITS ANZEIGE (Für Fehlersuche beim Drift) */}
+            {currentCoords && (
+                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1005]">
+                    <div className={`px-4 py-1.5 rounded-full backdrop-blur-md border shadow-lg text-[9px] font-black uppercase tracking-wider flex items-center gap-2 ${currentCoords.accuracy > ACCURACY_THRESHOLD ? 'bg-red-500/80 border-red-400 text-white animate-pulse' : 'bg-white/80 border-slate-200 text-slate-600'}`}>
+                        <Icons.MapPin className="w-3 h-3" />
+                        <span>Genauigkeit: {Math.round(currentCoords.accuracy)}m {currentCoords.accuracy > ACCURACY_THRESHOLD ? '(STÖRSIGNAL)' : ''}</span>
+                    </div>
+                </div>
+            )}
+
             <div className="absolute top-4 right-4 z-[1005] flex flex-col gap-2">
               <button onClick={() => setState(prev => ({...prev, currentTruckType: prev.currentTruckType === TruckType.AXLE_3 ? TruckType.AXLE_4 : TruckType.AXLE_3}))} className="bg-slate-900 text-white p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border border-slate-700">
                 <Icons.Truck className="w-5 h-5 text-amber-500 mb-1" /><span className="text-[8px] font-black">{state.currentTruckType.includes('10') ? '3-ACHSER' : '4-ACHSER'}</span>
