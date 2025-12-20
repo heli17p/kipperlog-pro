@@ -842,7 +842,20 @@ const App: React.FC = () => {
             </div>
             <div className="p-8 space-y-6">
               <div className="space-y-4">
-                <div className="flex justify-between items-center"><span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material</span><span className={`px-3 py-1 rounded-full text-white text-[10px] font-black uppercase ${getMaterialColor(activeLoadData.material)}`}>{activeLoadData.material}</span></div>
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material korrigieren</span>
+                  <div className="flex flex-wrap gap-2">
+                    {state.materials.map(m => (
+                      <button 
+                        key={m.id} 
+                        onClick={() => handleUpdateLoadMaterial(activeAutoLoadId!, m.name)}
+                        className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeLoadData.material === m.name ? `${m.colorClass} text-white shadow-md ring-2 ring-white ring-offset-1` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
+                      >
+                        {m.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="space-y-2">
                   <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Fahrzeug wechseln</span>
                   <div className="grid grid-cols-2 gap-2">
