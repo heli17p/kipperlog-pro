@@ -14,43 +14,24 @@ export const MATERIAL_COLORS: Record<string, string> = {
 export const Icons = {
   Logo: (props: any) => (
     <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}>
-      {/* 1. MASSIVES FAHRGESTELL (DER RAHMEN) - 4-Achser Chassis */}
       <rect x="8" y="74" width="84" height="6" rx="1" fill="#1E293B" />
-      
-      {/* 2. 4-ACHSER RÄDER */}
       <circle cx="20" cy="84" r="8" fill="#0F172A" stroke="#F59E0B" strokeWidth="2.5"/>
       <circle cx="34" cy="84" r="8" fill="#0F172A" stroke="#F59E0B" strokeWidth="2.5"/>
       <circle cx="70" cy="84" r="8" fill="#0F172A" stroke="#F59E0B" strokeWidth="2.5"/>
       <circle cx="84" cy="84" r="8" fill="#0F172A" stroke="#F59E0B" strokeWidth="2.5"/>
-
-      {/* 3. FÜHRERHAUS */}
       <path d="M8 74 V50 H24 L36 62 V74 Z" fill="#F59E0B" />
       <rect x="12" y="54" width="12" height="10" fill="#0F172A" opacity="0.4" />
-
-      {/* 4. HYDRAULIK-ZYLINDER */}
       <rect x="44" y="55" width="4" height="20" rx="1" fill="#94A3B8" />
-
-      {/* 5. DIE MULDE (Um das Hecklager gekippt) */}
       <g transform="rotate(25 92 74)">
-        {/* Mulden-Körper */}
         <path d="M38 42 H88 V74 H42 L38 42 Z" fill="#F59E0B" />
-        
-        {/* Rippen */}
         <rect x="52" y="46" width="2.5" height="24" fill="#0F172A" opacity="0.1" />
         <rect x="66" y="46" width="2.5" height="24" fill="#0F172A" opacity="0.1" />
         <rect x="80" y="46" width="2.5" height="24" fill="#0F172A" opacity="0.1" />
-        
-        {/* AUSSCHWINGENDE RÜCKWAND (PENDELKLAPPE) */}
-        {/* Die Klappe ist am Scharnier (88, 42) befestigt und schwingt durch die Schwerkraft nach hinten aus */}
         <g transform="rotate(-15 88 42)">
           <rect x="88" y="42" width="4" height="32" rx="0.5" fill="#D97706" />
         </g>
-        
-        {/* OBERES SCHARNIER */}
         <circle cx="88" cy="42" r="1.5" fill="#0F172A" />
       </g>
-
-      {/* UNTERES KIPPLAGER */}
       <circle cx="92" cy="74" r="3" fill="#0F172A" />
     </svg>
   ),
@@ -83,5 +64,12 @@ export const Icons = {
   ),
   Globe: (props: any) => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+  ),
+  Lock: (props: any) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+  ),
+  Unlock: (props: any) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
   )
 };
+

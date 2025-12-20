@@ -52,6 +52,7 @@ const App: React.FC = () => {
   const [newSiteName, setNewSiteName] = useState('');
   const [mapMode, setMapMode] = useState<'standard' | 'satellite'>('standard');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isMapLocked, setIsMapLocked] = useState<boolean>(true);
   
   const [totalDisplayMode, setTotalDisplayMode] = useState<TotalDisplayMode>('total');
   const [statsFilter, setStatsFilter] = useState<'today' | 'week' | 'day' | 'all'>('today');
@@ -521,7 +522,7 @@ const App: React.FC = () => {
         }).addTo(markerLayerGroupRef.current);
         const siteIcon = L.divIcon({
           className: 'custom-div-icon',
-          html: `<div class="w-10 h-10 rounded-xl border-2 border-white shadow-2xl flex items-center justify-center ${isActive ? 'bg-amber-500' : 'bg-slate-700'} text-white">
+          html: `<div class="w-10 h-10 rounded-xl border-2 border-white shadow-2xl flex items-center justify-center ${isActive ? 'bg-amber-500' : 'bg-slate-700'} text-white transition-all ${!isMapLocked ? 'ring-4 ring-amber-400 ring-offset-2 scale-110' : ''}">
                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"/><path d="M9 22v-4h6v4"/></svg>
                  </div>`,
           iconSize: [40, 40],
@@ -529,7 +530,7 @@ const App: React.FC = () => {
         });
         const siteMarker = L.marker([site.latitude, site.longitude], {
           icon: siteIcon,
-          draggable: true
+          draggable: !isMapLocked
         }).addTo(markerLayerGroupRef.current);
         siteMarker.on('dragend', (e: any) => {
           const pos = e.target.getLatLng();
@@ -550,13 +551,13 @@ const App: React.FC = () => {
         const matColor = getMaterialColor(p.material);
         const icon = L.divIcon({
           className: 'custom-div-icon',
-          html: `<div class="w-12 h-12 rounded-full border-4 ${isActive ? 'border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.5)]' : 'border-white'} shadow-2xl flex flex-col items-center justify-center ${matColor} text-white font-black text-[9px] leading-tight">
+          html: `<div class="w-12 h-12 rounded-full border-4 ${isActive ? 'border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.5)]' : 'border-white'} shadow-2xl flex flex-col items-center justify-center ${matColor} text-white font-black text-[9px] leading-tight transition-all ${!isMapLocked ? 'ring-4 ring-amber-400 ring-offset-2 animate-pulse scale-110' : ''}">
                    <span class="uppercase">${p.material.substring(0,4)}</span>
                  </div>`,
           iconSize: [48, 48],
           iconAnchor: [24, 24]
         });
-        const marker = L.marker([p.latitude, p.longitude], { icon, draggable: true, autoPan: true }).addTo(markerLayerGroupRef.current);
+        const marker = L.marker([p.latitude, p.longitude], { icon, draggable: !isMapLocked, autoPan: true }).addTo(markerLayerGroupRef.current);
         marker.on('dragend', (e: any) => {
           const newPos = e.target.getLatLng();
           handleUpdatePointPos(site.id, p.id, newPos.lat, newPos.lng);
@@ -573,7 +574,7 @@ const App: React.FC = () => {
         radius: 10, color: '#ffffff', fillColor: '#3b82f6', fillOpacity: 1, weight: 3
       }).addTo(markerLayerGroupRef.current);
     }
-  }, [activeTab, state.activeSiteId, state.sites, currentCoords, state.materials]);
+  }, [activeTab, state.activeSiteId, state.sites, currentCoords, state.materials, isMapLocked]);
 
   useEffect(() => {
     let interval: any;
@@ -922,6 +923,13 @@ const App: React.FC = () => {
             )}
 
             <div className="absolute top-4 right-4 z-[1005] flex flex-col gap-2">
+              <button 
+                onClick={() => setIsMapLocked(!isMapLocked)} 
+                className={`p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border-2 ${!isMapLocked ? 'bg-amber-500 border-white text-white animate-pulse' : 'bg-white border-slate-200 text-slate-600'}`}
+              >
+                {isMapLocked ? <Icons.Lock className="w-5 h-5 mb-1" /> : <Icons.Unlock className="w-5 h-5 mb-1" />}
+                <span className="text-[8px] font-black uppercase">{isMapLocked ? 'GESPERRT' : 'BEARBEITEN'}</span>
+              </button>
               <button onClick={() => setState(prev => ({...prev, currentTruckType: prev.currentTruckType === TruckType.AXLE_3 ? TruckType.AXLE_4 : TruckType.AXLE_3}))} className="bg-slate-900 text-white p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border border-slate-700">
                 <Icons.Truck className="w-5 h-5 text-amber-500 mb-1" /><span className="text-[8px] font-black">{state.currentTruckType.includes('10') ? '3-ACHSER' : '4-ACHSER'}</span>
               </button>
@@ -937,7 +945,13 @@ const App: React.FC = () => {
                     <div className="bg-red-600 text-white px-3 py-1.5 rounded-xl shadow-xl text-[10px] font-black uppercase animate-pulse border-2 border-white">Offline-Modus</div>
                 </div>
             )}
-            <div className="absolute bottom-6 left-4 right-4 z-[1005]"><div className="bg-white/90 p-3 rounded-2xl backdrop-blur-sm text-center shadow-lg border border-slate-200"><p className="text-[10px] text-slate-800 font-black uppercase tracking-widest leading-tight">Auf Karte tippen, um Bagger zu setzen</p></div></div>
+            <div className="absolute bottom-6 left-4 right-4 z-[1005]">
+                <div className={`p-3 rounded-2xl backdrop-blur-sm text-center shadow-lg border transition-all ${!isMapLocked ? 'bg-amber-600/90 text-white border-white scale-105' : 'bg-white/90 text-slate-800 border-slate-200'}`}>
+                    <p className="text-[10px] font-black uppercase tracking-widest leading-tight">
+                        {!isMapLocked ? 'Symbol ziehen zum Verschieben' : 'Auf Karte tippen, um Bagger zu setzen'}
+                    </p>
+                </div>
+            </div>
           </div>
         )}
 
