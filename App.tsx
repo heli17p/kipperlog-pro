@@ -24,6 +24,8 @@ const COLOR_PALETTE = [
   'bg-pink-600', 'bg-cyan-600', 'bg-lime-600'
 ];
 
+type TotalDisplayMode = 'total' | 'today' | 'week' | 'month' | 'year';
+
 declare const L: any; 
 
 const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
@@ -41,7 +43,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'track' | 'history' | 'stats' | 'settings'>('track');
   const [currentCoords, setCurrentCoords] = useState<{lat: number, lon: number} | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const [gpsRetryKey, setGpsRetryKey] = useState<number>(0); // Neu: Um GPS-Watch neu zu triggern
+  const [gpsRetryKey, setGpsRetryKey] = useState<number>(0); 
   const [activeAutoLoadId, setActiveAutoLoadId] = useState<string | null>(null);
   const [showMaterialPicker, setShowMaterialPicker] = useState<boolean>(false);
   const [autoCenter, setAutoCenter] = useState<boolean>(true);
@@ -50,6 +52,7 @@ const App: React.FC = () => {
   const [mapMode, setMapMode] = useState<'standard' | 'satellite'>('standard');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   
+  const [totalDisplayMode, setTotalDisplayMode] = useState<TotalDisplayMode>('total');
   const [statsFilter, setStatsFilter] = useState<'today' | 'week' | 'day' | 'all'>('today');
   const [historyFilter, setHistoryFilter] = useState<'today' | 'yesterday' | 'week' | 'all'>('today');
   const [selectedStatsDate, setSelectedStatsDate] = useState(new Date().toISOString().split('T')[0]);
@@ -152,7 +155,6 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // --- GPS WATCHER MIT RETRY-LOGIK ---
   useEffect(() => {
     if (!("geolocation" in navigator)) {
       setLocationError("Dein Browser unterstützt kein GPS.");
@@ -161,7 +163,6 @@ const App: React.FC = () => {
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        // Fehler sofort löschen, wenn wir Daten bekommen
         setLocationError(null);
         const coords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
         setCurrentCoords(coords);
@@ -186,6 +187,46 @@ const App: React.FC = () => {
     setLocationError(null);
     setGpsRetryKey(prev => prev + 1);
   };
+
+  const cycleTotalDisplay = () => {
+    const modes: TotalDisplayMode[] = ['total', 'today', 'week', 'month', 'year'];
+    const currentIndex = modes.indexOf(totalDisplayMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    setTotalDisplayMode(modes[nextIndex]);
+  };
+
+  const summaryVolume = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    
+    // Montag der aktuellen Woche finden
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+    
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const startOfYear = new Date(now.getFullYear(), 0, 1).getTime();
+
+    const filtered = state.loads.filter(l => {
+      if (totalDisplayMode === 'total') return true;
+      if (totalDisplayMode === 'today') return l.timestamp >= startOfToday;
+      if (totalDisplayMode === 'week') return l.timestamp >= startOfWeek;
+      if (totalDisplayMode === 'month') return l.timestamp >= startOfMonth;
+      if (totalDisplayMode === 'year') return l.timestamp >= startOfYear;
+      return true;
+    });
+    return filtered.reduce((sum, l) => sum + l.volume, 0);
+  }, [state.loads, totalDisplayMode]);
+
+  const totalLabel = useMemo(() => {
+    switch(totalDisplayMode) {
+      case 'today': return 'Heute';
+      case 'week': return 'Woche';
+      case 'month': return 'Monat';
+      case 'year': return 'Jahr';
+      default: return 'Total';
+    }
+  }, [totalDisplayMode]);
 
   const adjustVolume = (id: string, delta: number) => {
     setState(prev => ({
@@ -600,7 +641,11 @@ const App: React.FC = () => {
     yesterdayDate.setDate(now.getDate() - 1);
     const startOfYesterday = new Date(yesterdayDate.getFullYear(), yesterdayDate.getMonth(), yesterdayDate.getDate()).getTime();
     const endOfYesterday = startOfToday - 1;
-    const startOfWeek = new Date(now.setDate(now.getDate() - (now.getDay() || 7) + 1)).setHours(0,0,0,0);
+    
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+
     return sortedLoads.filter(load => {
       if (historyFilter === 'all') return true;
       if (historyFilter === 'today') return load.timestamp >= startOfToday;
@@ -613,7 +658,11 @@ const App: React.FC = () => {
   const filteredStatsBySite = useMemo(() => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const startOfWeek = new Date(now.setDate(now.getDate() - (now.getDay() || 7) + 1)).setHours(0,0,0,0);
+    
+    const day = now.getDay();
+    const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+    const startOfWeek = new Date(now.setDate(diff)).setHours(0,0,0,0);
+
     const filterFn = (load: Load) => {
       if (statsFilter === 'all') return true;
       if (statsFilter === 'today') return load.timestamp >= startOfToday;
@@ -821,10 +870,16 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
-          <div className="text-right">
-            <span className="text-2xl font-black text-white">{state.loads.reduce((s,l) => s+l.volume, 0).toFixed(1)}</span>
-            <span className="text-[10px] block text-amber-500 font-black uppercase leading-none">m³ Total</span>
-          </div>
+          <button 
+            onClick={cycleTotalDisplay}
+            className="text-right group active:scale-95 transition-transform bg-slate-800/50 px-4 py-2 rounded-2xl border border-slate-700 hover:border-amber-500"
+          >
+            <span className="text-2xl font-black text-white">{summaryVolume.toFixed(1)}</span>
+            <div className="flex items-center justify-end gap-1.5">
+              <span className="text-[10px] block text-amber-500 font-black uppercase leading-none">{totalLabel}</span>
+              <Icons.History className="w-2.5 h-2.5 text-slate-500 group-hover:text-amber-500" />
+            </div>
+          </button>
         </div>
       </header>
 
