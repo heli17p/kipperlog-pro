@@ -4,7 +4,7 @@ import { TruckType, Site, Load, AppState, LoadingPoint, CustomMaterial } from '.
 import { Icons } from './constants';
 
 const STORAGE_KEY = 'kipper_log_app_data_v16';
-const LOADING_ZONE_RADIUS = 25; 
+const LOADING_ZONE_RADIUS_DEFAULT = 25; 
 const DEFAULT_SITE_RADIUS = 200; 
 const DETECTION_DELAY_MS = 5000; 
 const RESET_COOLDOWN_MS = 3000; 
@@ -302,6 +302,16 @@ const App: React.FC = () => {
     }));
   };
 
+  const handleUpdatePointRadius = (siteId: string, pointId: string, radius: number) => {
+    setState(prev => ({
+      ...prev,
+      sites: prev.sites.map(s => s.id === siteId ? {
+        ...s,
+        loadingPoints: s.loadingPoints.map(p => p.id === pointId ? { ...p, radius } : p)
+      } : s)
+    }));
+  };
+
   const handleUpdateSitePos = (siteId: string, lat: number, lon: number) => {
     setState(prev => ({
       ...prev,
@@ -352,7 +362,6 @@ const App: React.FC = () => {
         loadingPoints: s.loadingPoints.map(p => p.id === pointId ? { ...p, material: materialName } : p)
       } : s)
     }));
-    setEditingPoint(null);
   };
 
   const handleCreateSiteAndPoint = (materialName: string) => {
@@ -379,7 +388,8 @@ const App: React.FC = () => {
         name: materialName,
         material: materialName,
         latitude: coords.lat,
-        longitude: coords.lon
+        longitude: coords.lon,
+        radius: LOADING_ZONE_RADIUS_DEFAULT
       };
       return {
         ...prev,
@@ -533,8 +543,9 @@ const App: React.FC = () => {
         });
       }
       site.loadingPoints.forEach(p => {
+        const pointRadius = p.radius || LOADING_ZONE_RADIUS_DEFAULT;
         L.circle([p.latitude, p.longitude], { 
-          radius: LOADING_ZONE_RADIUS, color: '#f59e0b', fillColor: '#fbbf24', fillOpacity: 0.15, weight: 1
+          radius: pointRadius, color: '#f59e0b', fillColor: '#fbbf24', fillOpacity: 0.15, weight: 1
         }).addTo(markerLayerGroupRef.current);
         const matColor = getMaterialColor(p.material);
         const icon = L.divIcon({
@@ -579,7 +590,6 @@ const App: React.FC = () => {
   }, [activeAutoLoadId]);
 
   useEffect(() => {
-    // Wenn Genauigkeit zu schlecht ist (GPS Drift), Automatik überspringen
     if (!currentCoords || !state.autoCountEnabled || currentCoords.accuracy > ACCURACY_THRESHOLD) return;
     
     let detectedPoint: { p: LoadingPoint, s: Site } | null = null;
@@ -587,7 +597,8 @@ const App: React.FC = () => {
     outer: for (const site of state.sites) {
       for (const point of site.loadingPoints) {
         const dist = calculateDistance(currentCoords.lat, currentCoords.lon, point.latitude, point.longitude);
-        if (dist < LOADING_ZONE_RADIUS) {
+        const pointRadius = point.radius || LOADING_ZONE_RADIUS_DEFAULT;
+        if (dist < pointRadius) {
           detectedPoint = { p: point, s: site };
           break outer;
         }
@@ -637,6 +648,12 @@ const App: React.FC = () => {
   const activeLoadData = useMemo(() => activeAutoLoadId ? state.loads.find(l => l.id === activeAutoLoadId) : null, [activeAutoLoadId, state.loads]);
   const activeSiteData = useMemo(() => activeLoadData ? state.sites.find(s => s.id === activeLoadData.siteId) : null, [activeLoadData, state.sites]);
   const editingLoadData = useMemo(() => editingLoadId ? state.loads.find(l => l.id === editingLoadId) : null, [editingLoadId, state.loads]);
+  const editingPointData = useMemo(() => {
+    if (!editingPoint) return null;
+    const site = state.sites.find(s => s.id === editingPoint.siteId);
+    return site?.loadingPoints.find(p => p.id === editingPoint.pointId) || null;
+  }, [editingPoint, state.sites]);
+
   const sortedLoads = useMemo(() => [...state.loads].sort((a,b) => b.timestamp - a.timestamp), [state.loads]);
 
   const filteredHistoryLoads = useMemo(() => {
@@ -895,7 +912,6 @@ const App: React.FC = () => {
               <div ref={mapContainerRef} className="h-full w-full"></div>
             </div>
 
-            {/* GPS GENAUIGKEITS ANZEIGE (Für Fehlersuche beim Drift) */}
             {currentCoords && (
                 <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1005]">
                     <div className={`px-4 py-1.5 rounded-full backdrop-blur-md border shadow-lg text-[9px] font-black uppercase tracking-wider flex items-center gap-2 ${currentCoords.accuracy > ACCURACY_THRESHOLD ? 'bg-red-500/80 border-red-400 text-white animate-pulse' : 'bg-white/80 border-slate-200 text-slate-600'}`}>
@@ -936,7 +952,7 @@ const App: React.FC = () => {
                  </div>
                  <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
                    <div className="flex justify-between items-center">
-                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Radius anpassen</label>
+                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Baustellen-Radius</label>
                      <span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS)}m</span>
                    </div>
                    <input type="range" min="50" max="1000" step="10" value={state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS} onChange={(e) => handleUpdateSiteRadius(editingSite, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
@@ -960,21 +976,53 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {editingPoint && (
+        {editingPoint && editingPointData && (
           <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
-            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl">
-              <h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3>
+            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500 overflow-y-auto max-h-[90vh]">
+              <div className="flex justify-between items-start">
+                  <div>
+                    <h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-1">Einstellungen anpassen</p>
+                  </div>
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white ${getMaterialColor(editingPointData.material)} shadow-lg`}>
+                      <Icons.Truck className="w-6 h-6" />
+                  </div>
+              </div>
+
+              <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                <div className="flex justify-between items-center">
+                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bagger-Radius (Fangbereich)</label>
+                  <span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT)}m</span>
+                </div>
+                <input 
+                  type="range" min="10" max="150" step="5" 
+                  value={editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT} 
+                  onChange={(e) => handleUpdatePointRadius(editingPoint.siteId, editingPoint.pointId, parseInt(e.target.value))} 
+                  className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" 
+                />
+                <div className="flex justify-between text-[8px] font-black text-slate-400 uppercase"><span>10m (Präzise)</span><span>150m (Groß)</span></div>
+                <p className="text-[9px] text-slate-400 font-medium italic mt-1 leading-tight">Tipp: Bei schlechtem Signal (GPS-Drift) Radius etwas größer stellen.</p>
+              </div>
+
               <div className="space-y-2">
                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material ändern</label>
-                 <div className="grid grid-cols-1 gap-2 max-h-[40vh] overflow-y-auto pr-1">
+                 <div className="grid grid-cols-1 gap-2 max-h-[30vh] overflow-y-auto pr-1">
                   {state.materials.map(m => (
-                    <button key={m.id} onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center ${m.colorClass}`}>{m.name.toUpperCase()}</button>
+                    <button 
+                      key={m.id} 
+                      onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} 
+                      className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center transition-all ${m.name === editingPointData.material ? `${m.colorClass} shadow-lg scale-[1.02] border-2 border-white` : 'bg-slate-300 opacity-60'}`}
+                    >
+                      <span>{m.name.toUpperCase()}</span>
+                      {m.name === editingPointData.material && <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>}
+                    </button>
                   ))}
                  </div>
               </div>
-              <div className="grid grid-cols-1 gap-2">
-                <button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Abbrechen</button>
-                <button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button>
+
+              <div className="grid grid-cols-1 gap-2 pt-2">
+                <button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm shadow-lg active:scale-95 transition-all">Fertig</button>
+                <button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2 hover:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button>
               </div>
             </div>
           </div>

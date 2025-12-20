@@ -16,6 +16,7 @@ export interface LoadingPoint {
   material: string; // Name des Materials
   latitude: number;
   longitude: number;
+  radius?: number; // Optionaler individueller Radius
 }
 
 export interface Site {
@@ -48,3 +49,4 @@ export interface AppState {
   autoDetectEnabled: boolean;
   autoCountEnabled: boolean;
 }
+
