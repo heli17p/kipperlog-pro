@@ -1,14 +1,14 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { TruckType, Site, Load, AppState, LoadingPoint, CustomMaterial } from './types';
+import { Truck, Site, Load, AppState, LoadingPoint, CustomMaterial } from './types';
 import { Icons } from './constants';
 
-const STORAGE_KEY = 'kipper_log_app_data_v16';
+const STORAGE_KEY = 'kipper_log_app_data_v17';
 const LOADING_ZONE_RADIUS_DEFAULT = 25; 
 const DEFAULT_SITE_RADIUS = 200; 
 const DETECTION_DELAY_MS = 5000; 
 const RESET_COOLDOWN_MS = 3000; 
-const ACCURACY_THRESHOLD = 50; // Meter: Signale ungenauer als 50m werden für die Automatik ignoriert
+const ACCURACY_THRESHOLD = 50; 
 
 const DEFAULT_MATERIALS: CustomMaterial[] = [
   { id: '1', name: 'Aushub', colorClass: 'bg-amber-600' },
@@ -17,6 +17,11 @@ const DEFAULT_MATERIALS: CustomMaterial[] = [
   { id: '4', name: 'Asphaltabbruch', colorClass: 'bg-neutral-800' },
   { id: '5', name: 'Humus', colorClass: 'bg-emerald-600' },
   { id: '6', name: 'Sonstiges', colorClass: 'bg-blue-600' }
+];
+
+const DEFAULT_TRUCKS: Truck[] = [
+  { id: 't1', name: '3-Achser', volume: 10 },
+  { id: 't2', name: '4-Achser', volume: 12 }
 ];
 
 const COLOR_PALETTE = [
@@ -74,6 +79,9 @@ const App: React.FC = () => {
   const [siteDeleteConfirm, setSiteDeleteConfirm] = useState<boolean>(false);
   const [newMaterialName, setNewMaterialName] = useState<string>('');
   const [showMaterialManager, setShowMaterialManager] = useState<boolean>(false);
+  
+  const [showTruckManager, setShowTruckManager] = useState<boolean>(false);
+  const [newTruckData, setNewTruckData] = useState<{name: string, plate: string, volume: string}>({name: '', plate: '', volume: ''});
 
   const mapRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -88,13 +96,18 @@ const App: React.FC = () => {
       sites: [],
       loads: [],
       materials: DEFAULT_MATERIALS,
+      trucks: DEFAULT_TRUCKS,
+      activeTruckId: 't2',
       activeSiteId: null,
-      currentTruckType: TruckType.AXLE_4,
       autoDetectEnabled: true,
       autoCountEnabled: true,
       stayAwake: true, 
     };
   });
+
+  const activeTruck = useMemo(() => 
+    state.trucks.find(t => t.id === state.activeTruckId) || state.trucks[0] || DEFAULT_TRUCKS[0]
+  , [state.trucks, state.activeTruckId]);
 
   const getMaterialColor = (matName: string) => {
     const mat = state.materials.find(m => m.name === matName);
@@ -246,14 +259,30 @@ const App: React.FC = () => {
     }));
   };
 
-  const switchTruckForLoad = (loadId: string, newType: TruckType) => {
+  const switchTruckForLoad = (loadId: string, truckId: string) => {
+    const selectedTruck = state.trucks.find(t => t.id === truckId);
+    if (!selectedTruck) return;
+
     setState(prev => {
-      const newVolume = newType === TruckType.AXLE_3 ? 10 : 12;
       return {
         ...prev,
-        currentTruckType: activeAutoLoadId === loadId ? newType : prev.currentTruckType,
-        loads: prev.loads.map(l => l.id === loadId ? { ...l, truckType: newType, volume: newVolume } : l)
+        activeTruckId: activeAutoLoadId === loadId ? truckId : prev.activeTruckId,
+        loads: prev.loads.map(l => l.id === loadId ? { 
+          ...l, 
+          truckId: truckId, 
+          truckName: selectedTruck.name,
+          volume: selectedTruck.volume 
+        } : l)
       };
+    });
+  };
+
+  const cycleActiveTruck = () => {
+    setState(prev => {
+      if (prev.trucks.length === 0) return prev;
+      const currentIndex = prev.trucks.findIndex(t => t.id === prev.activeTruckId);
+      const nextIndex = (currentIndex + 1) % prev.trucks.length;
+      return { ...prev, activeTruckId: prev.trucks[nextIndex].id };
     });
   };
 
@@ -432,6 +461,34 @@ const App: React.FC = () => {
         ...prev,
         materials: prev.materials.filter(m => m.id !== id)
     }));
+  };
+
+  const handleAddTruck = () => {
+    if (!newTruckData.name || !newTruckData.volume) return;
+    const newT: Truck = {
+      id: crypto.randomUUID(),
+      name: newTruckData.name,
+      plate: newTruckData.plate,
+      volume: parseFloat(newTruckData.volume)
+    };
+    setState(prev => ({
+      ...prev,
+      trucks: [...prev.trucks, newT],
+      activeTruckId: prev.trucks.length === 0 ? newT.id : prev.activeTruckId
+    }));
+    setNewTruckData({name: '', plate: '', volume: ''});
+  };
+
+  const handleDeleteTruck = (id: string) => {
+    if (state.trucks.length <= 1) return;
+    setState(prev => {
+      const filtered = prev.trucks.filter(t => t.id !== id);
+      return {
+        ...prev,
+        trucks: filtered,
+        activeTruckId: prev.activeTruckId === id ? (filtered[0]?.id || null) : prev.activeTruckId
+      };
+    });
   };
 
   const centerMapOnSite = (siteId: string) => {
@@ -620,15 +677,23 @@ const App: React.FC = () => {
                 .sort((a,b) => b.timestamp - a.timestamp)[0];
               
               if (!lastAutoLoad || (now - lastAutoLoad.timestamp > 15000)) { 
-                setState(prev => ({ ...prev, activeSiteId: dp.s.id }));
                 const id = crypto.randomUUID();
-                const volume = state.currentTruckType === TruckType.AXLE_3 ? 10 : 12;
-                const newLoad: Load = {
-                  id, siteId: dp.s.id, loadingPointId: dp.p.id,
-                  material: dp.p.material, volume, truckType: state.currentTruckType,
-                  timestamp: now, isAutoGenerated: true
-                };
-                setState(prev => ({ ...prev, loads: [...prev.loads, newLoad] }));
+                setState(prev => {
+                  const currentTruck = prev.trucks.find(t => t.id === prev.activeTruckId) || prev.trucks[0];
+                  const newLoad: Load = {
+                    id, siteId: dp.s.id, loadingPointId: dp.p.id,
+                    material: dp.p.material, 
+                    volume: currentTruck?.volume || 10, 
+                    truckId: currentTruck?.id,
+                    truckName: currentTruck?.name,
+                    timestamp: now, isAutoGenerated: true
+                  };
+                  return {
+                    ...prev,
+                    activeSiteId: dp.s.id,
+                    loads: [...prev.loads, newLoad]
+                  };
+                });
                 setActiveAutoLoadId(id);
               }
               detectionStartTimeRef.current = null;
@@ -741,12 +806,7 @@ const App: React.FC = () => {
                  <p className="text-xs font-bold leading-tight">{locationError}</p>
                </div>
              </div>
-             <button 
-               onClick={handleGpsRetry}
-               className="bg-white text-red-600 px-3 py-2 rounded-xl text-[10px] font-black uppercase shadow-lg active:scale-95 transition-transform shrink-0"
-             >
-               Erneut prüfen
-             </button>
+             <button onClick={handleGpsRetry} className="bg-white text-red-600 px-3 py-2 rounded-xl text-[10px] font-black uppercase shadow-lg active:scale-95 transition-transform shrink-0">Erneut prüfen</button>
            </div>
         </div>
       )}
@@ -754,9 +814,7 @@ const App: React.FC = () => {
       {detectionProgress > 0 && !activeAutoLoadId && (
         <div className="fixed top-24 left-4 right-4 z-[4000] bg-white/90 backdrop-blur-md p-4 rounded-2xl shadow-xl border border-amber-200 animate-in fade-in slide-in-from-top-4">
            <div className="flex items-center gap-3 mb-2">
-             <div className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center text-white">
-               <Icons.Truck className="w-5 h-5 animate-pulse" />
-             </div>
+             <div className="w-8 h-8 rounded-full bg-amber-500 flex items-center justify-center text-white"><Icons.Truck className="w-5 h-5 animate-pulse" /></div>
              <div className="flex-1">
                <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest leading-none">Bagger erkannt</p>
                <p className="text-xs font-bold text-slate-800 uppercase">Beladung wird vorbereitet...</p>
@@ -769,51 +827,52 @@ const App: React.FC = () => {
       )}
 
       {editingLoadData && (
-        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-6 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white w-full rounded-[3rem] shadow-2xl overflow-hidden border-4 border-slate-900 animate-in slide-in-from-bottom-10 duration-300">
-            <div className="bg-slate-900 p-6 text-white">
-              <div className="flex justify-between items-center mb-4">
-                <div>
-                  <h2 className="text-xl font-black italic uppercase text-amber-500">FUHRE BEARBEITEN</h2>
-                  <p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">Nachträgliche Korrektur</p>
+        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-4 bg-slate-900/40 backdrop-blur-sm overflow-hidden">
+          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[95vh] border-4 border-slate-900 animate-in slide-in-from-bottom-10 duration-300">
+            <div className="overflow-y-auto w-full">
+              <div className="bg-slate-900 p-5 text-white">
+                <div className="flex justify-between items-center mb-2">
+                  <div>
+                    <h2 className="text-xl font-black italic uppercase text-amber-500">FUHRE BEARBEITEN</h2>
+                    <p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">Nachträgliche Korrektur</p>
+                  </div>
+                  <Icons.Edit className="w-8 h-8 text-amber-500" />
                 </div>
-                <Icons.Edit className="w-8 h-8 text-amber-500" />
               </div>
-            </div>
-            <div className="p-8 space-y-6">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material ändern</span>
-                  <div className="flex flex-wrap gap-2">
-                    {state.materials.map(m => (
-                        <button 
-                            key={m.id} 
-                            onClick={() => handleUpdateLoadMaterial(editingLoadId!, m.name)}
-                            className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${editingLoadData.material === m.name ? `${m.colorClass} text-white shadow-md` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
-                        >
-                            {m.name}
-                        </button>
-                    ))}
+              <div className="p-6 space-y-5">
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material ändern</span>
+                    <div className="flex flex-wrap gap-2">
+                      {state.materials.map(m => (
+                          <button 
+                              key={m.id} 
+                              onClick={() => handleUpdateLoadMaterial(editingLoadId!, m.name)}
+                              className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${editingLoadData.material === m.name ? `${m.colorClass} text-white shadow-md` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
+                          >
+                              {m.name}
+                          </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW wechseln</span>
+                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto pr-1">
+                      {state.trucks.map(t => (
+                        <button key={t.id} onClick={() => switchTruckForLoad(editingLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${editingLoadData.truckId === t.id ? `${getMaterialColor(editingLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name} ({t.volume}m³)</button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Fahrzeugtyp</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button onClick={() => switchTruckForLoad(editingLoadId!, TruckType.AXLE_3)} className={`py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${editingLoadData.truckType === TruckType.AXLE_3 ? `${getMaterialColor(editingLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>3-Achser (10m³)</button>
-                    <button onClick={() => switchTruckForLoad(editingLoadId!, TruckType.AXLE_4)} className={`py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${editingLoadData.truckType === TruckType.AXLE_4 ? `${getMaterialColor(editingLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>4-Achser (12m³)</button>
+                <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
+                  <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge korrigieren</p>
+                  <div className="flex items-center justify-between">
+                    <button onClick={() => adjustVolume(editingLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
+                    <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{editingLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(editingLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
+                    <button onClick={() => adjustVolume(editingLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
                   </div>
                 </div>
-              </div>
-              <div className="bg-slate-50 p-6 rounded-[2.5rem] border-2 border-slate-100">
-                <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4">Menge korrigieren</p>
-                <div className="flex items-center justify-between">
-                  <button onClick={() => adjustVolume(editingLoadId!, -0.5)} className="w-14 h-14 rounded-2xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-3xl font-black text-slate-900">-</span></button>
-                  <div className="text-center"><span className="text-6xl font-black italic text-slate-900">{editingLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(editingLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
-                  <button onClick={() => adjustVolume(editingLoadId!, 0.5)} className="w-14 h-14 rounded-2xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-3xl font-black text-slate-900">+</span></button>
-                </div>
-              </div>
-              <div className="pt-2">
-                <button onClick={() => setEditingLoadId(null)} className={`w-full py-5 rounded-2xl ${getMaterialColor(editingLoadData.material)} text-white font-black uppercase text-base shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all border-b-4 border-black/20`}>Änderungen Speichern</button>
+                <div className="pt-2 pb-2"><button onClick={() => setEditingLoadId(null)} className={`w-full py-5 rounded-2xl ${getMaterialColor(editingLoadData.material)} text-white font-black uppercase text-base shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all border-b-4 border-black/20`}>Änderungen Speichern</button></div>
               </div>
             </div>
           </div>
@@ -821,72 +880,69 @@ const App: React.FC = () => {
       )}
 
       {activeLoadData && (
-        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-6 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white w-full rounded-[3rem] shadow-2xl overflow-hidden border-4 border-amber-500 animate-in slide-in-from-bottom-10 duration-300">
-            <div className="bg-slate-900 p-6 text-white">
-              <div className="flex justify-between items-center mb-4">
-                <div>
-                  <h2 className="text-xl font-black italic uppercase text-amber-500">BELADUNG AKTIV</h2>
-                  <p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">LKW wird beladen</p>
+        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-4 bg-slate-900/40 backdrop-blur-sm overflow-hidden">
+          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[95vh] border-4 border-amber-500 animate-in slide-in-from-bottom-10 duration-300">
+            <div className="overflow-y-auto w-full">
+              <div className="bg-slate-900 p-5 text-white">
+                <div className="flex justify-between items-center mb-3">
+                  <div><h2 className="text-xl font-black italic uppercase text-amber-500">BELADUNG AKTIV</h2><p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">LKW wird beladen</p></div>
+                  <Icons.Truck className="w-8 h-8 text-amber-500 animate-bounce" />
                 </div>
-                <Icons.Truck className="w-8 h-8 text-amber-500 animate-bounce" />
-              </div>
-              <div className="bg-slate-800 p-3 rounded-2xl border border-slate-700 flex items-center gap-3">
-                <Icons.Building className="w-4 h-4 text-amber-500" />
-                <div className="flex-1">
-                  <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest leading-none mb-1">Baustelle benennen</p>
-                  <input type="text" value={activeSiteData?.name || ''} onChange={(e) => handleRenameSite(activeLoadData.siteId, e.target.value)} placeholder="NAME EINGEBEN..." className="w-full bg-transparent border-none text-white font-black uppercase text-sm outline-none focus:text-amber-400 placeholder:text-slate-600" />
-                </div>
-                <Icons.Edit className="w-3 h-3 text-slate-600" />
-              </div>
-            </div>
-            <div className="p-8 space-y-6">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material korrigieren</span>
-                  <div className="flex flex-wrap gap-2">
-                    {state.materials.map(m => (
-                      <button 
-                        key={m.id} 
-                        onClick={() => handleUpdateLoadMaterial(activeAutoLoadId!, m.name)}
-                        className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeLoadData.material === m.name ? `${m.colorClass} text-white shadow-md ring-2 ring-white ring-offset-1` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
-                      >
-                        {m.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Fahrzeug wechseln</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button onClick={() => switchTruckForLoad(activeAutoLoadId!, TruckType.AXLE_3)} className={`py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${activeLoadData.truckType === TruckType.AXLE_3 ? `${getMaterialColor(activeLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>3-Achser (10m³)</button>
-                    <button onClick={() => switchTruckForLoad(activeAutoLoadId!, TruckType.AXLE_4)} className={`py-2 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${activeLoadData.truckType === TruckType.AXLE_4 ? `${getMaterialColor(activeLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>4-Achser (12m³)</button>
-                  </div>
+                <div className="bg-slate-800 p-3 rounded-2xl border border-slate-700 flex items-center gap-3">
+                  <Icons.Building className="w-4 h-4 text-amber-500" />
+                  <div className="flex-1"><p className="text-[8px] font-black text-slate-500 uppercase tracking-widest leading-none mb-1">Baustelle benennen</p><input type="text" value={activeSiteData?.name || ''} onChange={(e) => handleRenameSite(activeLoadData.siteId, e.target.value)} placeholder="NAME EINGEBEN..." className="w-full bg-transparent border-none text-white font-black uppercase text-sm outline-none focus:text-amber-400 placeholder:text-slate-600" /></div>
+                  <Icons.Edit className="w-3 h-3 text-slate-600" />
                 </div>
               </div>
-              <div className="bg-slate-50 p-6 rounded-[2.5rem] border-2 border-slate-100">
-                <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4">Menge korrigieren</p>
-                <div className="flex items-center justify-between">
-                  <button onClick={() => adjustVolume(activeAutoLoadId!, -0.5)} className="w-14 h-14 rounded-2xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-3xl font-black text-slate-900">-</span></button>
-                  <div className="text-center"><span className="text-6xl font-black italic text-slate-900">{activeLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(activeLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
-                  <button onClick={() => adjustVolume(activeAutoLoadId!, 0.5)} className="w-14 h-14 rounded-2xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-3xl font-black text-slate-900">+</span></button>
-                </div>
-              </div>
-              
-              <div className="pt-2 space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <button onClick={() => setActiveAutoLoadId(null)} className="py-5 rounded-2xl bg-slate-100 text-slate-600 font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-slate-300 flex items-center justify-center gap-2"><Icons.Globe className="w-5 h-5" /> ZU KARTE</button>
-                  <button onClick={finalizeAndPrepareNext} className={`py-5 rounded-2xl ${getMaterialColor(activeLoadData.material)} text-white font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-black/20 flex items-center justify-center gap-2`}><Icons.Plus className="w-5 h-5" /> FERTIG</button>
-                </div>
-                <div className="relative">
-                  {!showConfirmCancel ? (
-                    <button onClick={() => setShowConfirmCancel(true)} className="w-full py-4 rounded-xl bg-red-100 text-red-700 font-black uppercase text-[10px] border border-red-200 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm"><Icons.Trash className="w-4 h-4" /> Fuhre abbrechen (löschen)</button>
-                  ) : (
-                    <div className="flex gap-2 animate-in zoom-in-95 duration-200">
-                       <button onClick={() => setShowConfirmCancel(false)} className="flex-1 py-4 rounded-xl bg-slate-100 text-slate-600 font-black uppercase text-[10px] border border-slate-200">Abbrechen</button>
-                      <button onClick={cancelActiveLoad} className="flex-[2] py-4 rounded-xl bg-red-600 text-white font-black uppercase text-[10px] border-b-4 border-red-800 shadow-xl flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> JA, DIESE FUHRE LÖSCHEN!</button>
+              <div className="p-6 space-y-5">
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material korrigieren</span>
+                    <div className="flex flex-wrap gap-2">
+                      {state.materials.map(m => (
+                        <button 
+                          key={m.id} 
+                          onClick={() => handleUpdateLoadMaterial(activeAutoLoadId!, m.name)}
+                          className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeLoadData.material === m.name ? `${m.colorClass} text-white shadow-md ring-2 ring-white ring-offset-1` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
+                        >
+                          {m.name}
+                        </button>
+                      ))}
                     </div>
-                  )}
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW wechseln</span>
+                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto pr-1">
+                      {state.trucks.map(t => (
+                        <button key={t.id} onClick={() => switchTruckForLoad(activeAutoLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${activeLoadData.truckId === t.id ? `${getMaterialColor(activeLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
+                  <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge korrigieren</p>
+                  <div className="flex items-center justify-between">
+                    <button onClick={() => adjustVolume(activeAutoLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
+                    <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{activeLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(activeLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
+                    <button onClick={() => adjustVolume(activeAutoLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
+                  </div>
+                </div>
+                
+                <div className="pt-2 space-y-4 pb-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <button onClick={() => setActiveAutoLoadId(null)} className="py-5 rounded-2xl bg-slate-100 text-slate-600 font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-slate-300 flex items-center justify-center gap-2"><Icons.Globe className="w-5 h-5" /> ZU KARTE</button>
+                    <button onClick={finalizeAndPrepareNext} className={`py-5 rounded-2xl ${getMaterialColor(activeLoadData.material)} text-white font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-black/20 flex items-center justify-center gap-2`}><Icons.Plus className="w-5 h-5" /> FERTIG</button>
+                  </div>
+                  <div className="relative">
+                    {!showConfirmCancel ? (
+                      <button onClick={() => setShowConfirmCancel(true)} className="w-full py-4 rounded-xl bg-red-100 text-red-700 font-black uppercase text-[10px] border border-red-200 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm"><Icons.Trash className="w-4 h-4" /> Fuhre abbrechen (löschen)</button>
+                    ) : (
+                      <div className="flex gap-2 animate-in zoom-in-95 duration-200">
+                         <button onClick={() => setShowConfirmCancel(false)} className="flex-1 py-4 rounded-xl bg-slate-100 text-slate-600 font-black uppercase text-[10px] border border-slate-200">Abbrechen</button>
+                        <button onClick={cancelActiveLoad} className="flex-[2] py-4 rounded-xl bg-red-600 text-white font-black uppercase text-[10px] border-b-4 border-red-800 shadow-xl flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> JA, DIESE FUHRE LÖSCHEN!</button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -900,21 +956,12 @@ const App: React.FC = () => {
             <Icons.Logo className="w-10 h-10 drop-shadow-lg" />
             <div>
               <h1 className="text-xl font-black italic text-amber-500 tracking-tighter leading-none">KIPPERLOG</h1>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-black text-white uppercase tracking-[0.3em] opacity-80">PRO</span>
-                {state.stayAwake && <div className="animate-pulse bg-green-500 w-1.5 h-1.5 rounded-full" title="Wach-Modus aktiv"></div>}
-              </div>
+              <div className="flex items-center gap-1.5"><span className="text-[10px] font-black text-white uppercase tracking-[0.3em] opacity-80">PRO</span>{state.stayAwake && <div className="animate-pulse bg-green-500 w-1.5 h-1.5 rounded-full" title="Wach-Modus aktiv"></div>}</div>
             </div>
           </div>
-          <button 
-            onClick={cycleTotalDisplay}
-            className="text-right group active:scale-95 transition-transform bg-slate-800/50 px-4 py-2 rounded-2xl border border-slate-700 hover:border-amber-500"
-          >
+          <button onClick={cycleTotalDisplay} className="text-right group active:scale-95 transition-transform bg-slate-800/50 px-4 py-2 rounded-2xl border border-slate-700 hover:border-amber-500">
             <span className="text-2xl font-black text-white">{summaryVolume.toFixed(1)}</span>
-            <div className="flex items-center justify-end gap-1.5">
-              <span className="text-[10px] block text-amber-500 font-black uppercase leading-none">{totalLabel}</span>
-              <Icons.History className="w-2.5 h-2.5 text-slate-500 group-hover:text-amber-500" />
-            </div>
+            <div className="flex items-center justify-end gap-1.5"><span className="text-[10px] block text-amber-500 font-black uppercase leading-none">{totalLabel}</span><Icons.History className="w-2.5 h-2.5 text-slate-500 group-hover:text-amber-500" /></div>
           </button>
         </div>
       </header>
@@ -922,9 +969,7 @@ const App: React.FC = () => {
       <main className="flex-1 overflow-y-auto pb-24 relative bg-slate-100 min-h-0">
         {activeTab === 'track' && (
           <div className="h-full w-full flex flex-col relative">
-            <div className="absolute inset-0 z-[10]">
-              <div ref={mapContainerRef} className="h-full w-full"></div>
-            </div>
+            <div className="absolute inset-0 z-[10]"><div ref={mapContainerRef} className="h-full w-full"></div></div>
 
             {currentCoords && (
                 <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1005]">
@@ -936,15 +981,12 @@ const App: React.FC = () => {
             )}
 
             <div className="absolute top-4 right-4 z-[1005] flex flex-col gap-2">
-              <button 
-                onClick={() => setIsMapLocked(!isMapLocked)} 
-                className={`p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border-2 ${!isMapLocked ? 'bg-amber-500 border-white text-white animate-pulse' : 'bg-white border-slate-200 text-slate-600'}`}
-              >
+              <button onClick={() => setIsMapLocked(!isMapLocked)} className={`p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border-2 ${!isMapLocked ? 'bg-amber-500 border-white text-white animate-pulse' : 'bg-white border-slate-200 text-slate-600'}`}>
                 {isMapLocked ? <Icons.Lock className="w-5 h-5 mb-1" /> : <Icons.Unlock className="w-5 h-5 mb-1" />}
                 <span className="text-[8px] font-black uppercase">{isMapLocked ? 'GESPERRT' : 'BEARBEITEN'}</span>
               </button>
-              <button onClick={() => setState(prev => ({...prev, currentTruckType: prev.currentTruckType === TruckType.AXLE_3 ? TruckType.AXLE_4 : TruckType.AXLE_3}))} className="bg-slate-900 text-white p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border border-slate-700">
-                <Icons.Truck className="w-5 h-5 text-amber-500 mb-1" /><span className="text-[8px] font-black">{state.currentTruckType.includes('10') ? '3-ACHSER' : '4-ACHSER'}</span>
+              <button onClick={cycleActiveTruck} className="bg-slate-900 text-white p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border border-slate-700">
+                <Icons.Truck className="w-5 h-5 text-amber-500 mb-1" /><span className="text-[8px] font-black uppercase truncate max-w-[65px]">{activeTruck?.name || 'LKW'}</span>
               </button>
               <button onClick={() => setMapMode(mapMode === 'standard' ? 'satellite' : 'standard')} className={`p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border ${mapMode === 'satellite' ? 'bg-amber-500 border-amber-600 text-white' : 'bg-white border-slate-200 text-slate-600'}`}>
                 <Icons.Globe className={`w-5 h-5 mb-1 ${mapMode === 'satellite' ? 'text-white' : 'text-slate-600'}`} /><span className="text-[8px] font-black uppercase">{mapMode === 'satellite' ? 'Karte' : 'Satellit'}</span>
@@ -953,18 +995,8 @@ const App: React.FC = () => {
                 <Icons.MapPin className={`w-5 h-5 mb-1 ${autoCenter ? 'text-white' : 'text-slate-400'}`} /><span className="text-[8px] font-black uppercase">GPS</span>
               </button>
             </div>
-            {!isOnline && (
-                <div className="absolute top-4 left-4 z-[1005]">
-                    <div className="bg-red-600 text-white px-3 py-1.5 rounded-xl shadow-xl text-[10px] font-black uppercase animate-pulse border-2 border-white">Offline-Modus</div>
-                </div>
-            )}
-            <div className="absolute bottom-6 left-4 right-4 z-[1005]">
-                <div className={`p-3 rounded-2xl backdrop-blur-sm text-center shadow-lg border transition-all ${!isMapLocked ? 'bg-amber-600/90 text-white border-white scale-105' : 'bg-white/90 text-slate-800 border-slate-200'}`}>
-                    <p className="text-[10px] font-black uppercase tracking-widest leading-tight">
-                        {!isMapLocked ? 'Symbol ziehen zum Verschieben' : 'Auf Karte tippen, um Bagger zu setzen'}
-                    </p>
-                </div>
-            </div>
+            {!isOnline && <div className="absolute top-4 left-4 z-[1005]"><div className="bg-red-600 text-white px-3 py-1.5 rounded-xl shadow-xl text-[10px] font-black uppercase animate-pulse border-2 border-white">Offline-Modus</div></div>}
+            <div className="absolute bottom-6 left-4 right-4 z-[1005]"><div className={`p-3 rounded-2xl backdrop-blur-sm text-center shadow-lg border transition-all ${!isMapLocked ? 'bg-amber-600/90 text-white border-white scale-105' : 'bg-white/90 text-slate-800 border-slate-200'}`}><p className="text-[10px] font-black uppercase tracking-widest leading-tight">{!isMapLocked ? 'Symbol ziehen zum Verschieben' : 'Auf Karte tippen, um Bagger zu setzen'}</p></div></div>
           </div>
         )}
 
@@ -973,15 +1005,9 @@ const App: React.FC = () => {
             <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500">
                <h3 className="text-xl font-black italic uppercase text-slate-900 flex items-center gap-2"><Icons.Building className="text-amber-500" /> Baustelle verwalten</h3>
                <div className="space-y-4">
-                 <div className="space-y-1">
-                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name ändern</label>
-                   <input defaultValue={state.sites.find(s => s.id === editingSite)?.name} onBlur={(e) => handleRenameSite(editingSite, e.target.value)} placeholder="NAME..." className="w-full bg-slate-100 p-4 rounded-2xl font-black text-lg uppercase outline-none focus:ring-4 focus:ring-amber-500/20" />
-                 </div>
+                 <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name ändern</label><input defaultValue={state.sites.find(s => s.id === editingSite)?.name} onBlur={(e) => handleRenameSite(editingSite, e.target.value)} placeholder="NAME..." className="w-full bg-slate-100 p-4 rounded-2xl font-black text-lg uppercase outline-none focus:ring-4 focus:ring-amber-500/20" /></div>
                  <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                   <div className="flex justify-between items-center">
-                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Baustellen-Radius</label>
-                     <span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS)}m</span>
-                   </div>
+                   <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Baustellen-Radius</label><span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS)}m</span></div>
                    <input type="range" min="50" max="1000" step="10" value={state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS} onChange={(e) => handleUpdateSiteRadius(editingSite, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
                    <div className="flex justify-between text-[8px] font-black text-slate-400 uppercase"><span>50m</span><span>500m</span><span>1000m</span></div>
                  </div>
@@ -1007,50 +1033,23 @@ const App: React.FC = () => {
           <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
             <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500 overflow-y-auto max-h-[90vh]">
               <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-1">Einstellungen anpassen</p>
-                  </div>
-                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white ${getMaterialColor(editingPointData.material)} shadow-lg`}>
-                      <Icons.Truck className="w-6 h-6" />
-                  </div>
+                  <div><h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3><p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-1">Einstellungen anpassen</p></div>
+                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white ${getMaterialColor(editingPointData.material)} shadow-lg`}><Icons.Truck className="w-6 h-6" /></div>
               </div>
-
               <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bagger-Radius (Fangbereich)</label>
-                  <span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT)}m</span>
-                </div>
-                <input 
-                  type="range" min="10" max="150" step="5" 
-                  value={editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT} 
-                  onChange={(e) => handleUpdatePointRadius(editingPoint.siteId, editingPoint.pointId, parseInt(e.target.value))} 
-                  className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" 
-                />
+                <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bagger-Radius (Fangbereich)</label><span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT)}m</span></div>
+                <input type="range" min="10" max="150" step="5" value={editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT} onChange={(e) => handleUpdatePointRadius(editingPoint.siteId, editingPoint.pointId, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
                 <div className="flex justify-between text-[8px] font-black text-slate-400 uppercase"><span>10m (Präzise)</span><span>150m (Groß)</span></div>
-                <p className="text-[9px] text-slate-400 font-medium italic mt-1 leading-tight">Tipp: Bei schlechtem Signal (GPS-Drift) Radius etwas größer stellen.</p>
               </div>
-
               <div className="space-y-2">
                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material ändern</label>
                  <div className="grid grid-cols-1 gap-2 max-h-[30vh] overflow-y-auto pr-1">
                   {state.materials.map(m => (
-                    <button 
-                      key={m.id} 
-                      onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} 
-                      className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center transition-all ${m.name === editingPointData.material ? `${m.colorClass} shadow-lg scale-[1.02] border-2 border-white` : 'bg-slate-300 opacity-60'}`}
-                    >
-                      <span>{m.name.toUpperCase()}</span>
-                      {m.name === editingPointData.material && <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>}
-                    </button>
+                    <button key={m.id} onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center transition-all ${m.name === editingPointData.material ? `${m.colorClass} shadow-lg scale-[1.02] border-2 border-white` : 'bg-slate-300 opacity-60'}`}><span>{m.name.toUpperCase()}</span>{m.name === editingPointData.material && <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>}</button>
                   ))}
                  </div>
               </div>
-
-              <div className="grid grid-cols-1 gap-2 pt-2">
-                <button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm shadow-lg active:scale-95 transition-all">Fertig</button>
-                <button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2 hover:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button>
-              </div>
+              <div className="grid grid-cols-1 gap-2 pt-2"><button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm shadow-lg active:scale-95 transition-all">Fertig</button><button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2 hover:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button></div>
             </div>
           </div>
         )}
@@ -1092,7 +1091,7 @@ const App: React.FC = () => {
               {filteredHistoryLoads.map(load => (
                 <div key={load.id} className="bg-white p-4 rounded-2xl shadow-sm flex justify-between items-center border border-slate-200">
                   <div className="flex-1">
-                    <div className="flex gap-2 mb-1"><span className={`text-[8px] font-black text-white px-2 py-0.5 rounded uppercase mb-1 ${getMaterialColor(load.material)}`}>{load.material}</span></div>
+                    <div className="flex gap-2 mb-1"><span className={`text-[8px] font-black text-white px-2 py-0.5 rounded uppercase mb-1 ${getMaterialColor(load.material)}`}>{load.material}</span><span className="text-[8px] font-black text-slate-400 border border-slate-200 px-2 py-0.5 rounded uppercase">{load.truckName || 'LKW'}</span></div>
                     <p className="font-black text-slate-800 uppercase text-xs truncate">{state.sites.find(s => s.id === load.siteId)?.name || 'Gelöscht'}</p>
                     <p className="text-[10px] text-slate-400 font-bold">{new Date(load.timestamp).toLocaleString()}</p>
                   </div>
@@ -1112,12 +1111,7 @@ const App: React.FC = () => {
                   </div>
                 </div>
               ))}
-              {filteredHistoryLoads.length === 0 && (
-                <div className="text-center py-20 bg-white rounded-[3rem] border-2 border-dashed border-slate-200">
-                  <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-200"><Icons.History className="w-8 h-8" /></div>
-                  <p className="text-slate-400 font-black uppercase text-[10px] tracking-widest">Keine Fuhren in diesem Zeitraum</p>
-                </div>
-              )}
+              {filteredHistoryLoads.length === 0 && <div className="text-center py-20 bg-white rounded-[3rem] border-2 border-dashed border-slate-200"><div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-200"><Icons.History className="w-8 h-8" /></div><p className="text-slate-400 font-black uppercase text-[10px] tracking-widest">Keine Fuhren in diesem Zeitraum</p></div>}
             </div>
           </div>
         )}
@@ -1131,14 +1125,7 @@ const App: React.FC = () => {
                   <button key={f.id} onClick={() => setStatsFilter(f.id as any)} className={`flex-1 min-w-[70px] py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${statsFilter === f.id ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-500'}`}>{f.label}</button>
                 ))}
               </div>
-              {statsFilter === 'day' && (
-                <div className="animate-in slide-in-from-top-2 duration-200">
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center gap-3">
-                    <input type="date" value={selectedStatsDate} onChange={(e) => setSelectedStatsDate(e.target.value)} className="flex-1 bg-transparent border-none text-sm font-black uppercase outline-none" />
-                    <Icons.History className="w-4 h-4 text-slate-300" />
-                  </div>
-                </div>
-              )}
+              {statsFilter === 'day' && <div className="animate-in slide-in-from-top-2 duration-200"><div className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center gap-3"><input type="date" value={selectedStatsDate} onChange={(e) => setSelectedStatsDate(e.target.value)} className="flex-1 bg-transparent border-none text-sm font-black uppercase outline-none" /><Icons.History className="w-4 h-4 text-slate-300" /></div></div>}
             </div>
             {Object.entries(filteredStatsBySite).length > 0 ? (
               <div className="space-y-6 animate-in fade-in duration-300">
@@ -1148,10 +1135,7 @@ const App: React.FC = () => {
                     <div className="p-5 space-y-3">
                       {Object.entries(siteData.materials).map(([mat, data]: [string, any]) => data.count > 0 ? (
                         <div key={mat} className="flex justify-between items-center border-b border-slate-50 pb-3">
-                          <div>
-                            <span className={`inline-block text-[8px] font-black text-white px-2 py-0.5 rounded uppercase mb-1 ${getMaterialColor(mat)}`}>{mat}</span>
-                            <p className="text-sm font-black text-slate-700">{data.count} Fuhren</p>
-                          </div>
+                          <div><span className={`inline-block text-[8px] font-black text-white px-2 py-0.5 rounded uppercase mb-1 ${getMaterialColor(mat)}`}>{mat}</span><p className="text-sm font-black text-slate-700">{data.count} Fuhren</p></div>
                           <div className="text-right"><p className="text-xl font-black text-amber-600 leading-none">{data.volume.toFixed(1)} m³</p></div>
                         </div>
                       ) : null)}
@@ -1159,20 +1143,9 @@ const App: React.FC = () => {
                     <div className="bg-slate-50 p-4 text-right border-t border-slate-100"><span className="text-[10px] font-black text-slate-400 uppercase mr-2">Zeitraum Summe:</span><span className="text-xl font-black text-slate-900 italic">{Object.values(siteData.materials as Record<string, any>).reduce((s: number, d: any) => s + d.volume, 0).toFixed(1)} m³</span></div>
                   </div>
                 ))}
-                <div className="bg-amber-500 p-6 rounded-[2.5rem] text-white shadow-xl">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] opacity-80 mb-1">Gesamtleistung Zeitraum</p>
-                    <div className="flex justify-between items-end">
-                        <span className="text-4xl font-black italic">{Object.values(filteredStatsBySite as Record<string, any>).reduce((acc: number, site: any) => acc + Object.values(site.materials as Record<string, any>).reduce((s: number, d: any) => s + d.volume, 0), 0).toFixed(1)} m³</span>
-                        <span className="text-sm font-black uppercase opacity-80">{Object.values(filteredStatsBySite as Record<string, any>).reduce((acc: number, site: any) => acc + Object.values(site.materials as Record<string, any>).reduce((s: number, d: any) => s + d.count, 0), 0)} Fuhren</span>
-                    </div>
-                </div>
               </div>
             ) : (
-              <div className="bg-white p-12 rounded-[3rem] text-center border-2 border-dashed border-slate-200">
-                <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Icons.Chart className="w-8 h-8" /></div>
-                <h4 className="text-slate-900 font-black uppercase text-sm mb-1">Keine Daten gefunden</h4>
-                <p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">In diesem Zeitraum wurden keine Fuhren erfasst.</p>
-              </div>
+              <div className="bg-white p-12 rounded-[3rem] text-center border-2 border-dashed border-slate-200"><div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Icons.Chart className="w-8 h-8" /></div><h4 className="text-slate-900 font-black uppercase text-sm mb-1">Keine Daten gefunden</h4><p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">In diesem Zeitraum wurden keine Fuhren erfasst.</p></div>
             )}
           </div>
         )}
@@ -1182,42 +1155,24 @@ const App: React.FC = () => {
             <h2 className="text-2xl font-black italic uppercase tracking-tighter">System</h2>
             
             <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
-              <div className="flex items-center gap-3 mb-2"><Icons.History className="w-5 h-5 text-amber-500" /><p className="font-black text-slate-800 uppercase text-sm">Speicher-Status</p></div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Fuhren</p>
-                    <p className="text-2xl font-black text-slate-900">{state.loads.length}</p>
-                </div>
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Baustellen</p>
-                    <p className="text-2xl font-black text-slate-900">{state.sites.length}</p>
-                </div>
+              <div className="flex items-center justify-between">
+                <div><p className="font-black text-slate-800 uppercase text-sm">LKW-Fuhrpark</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{state.trucks.length} Fahrzeuge angelegt</p></div>
+                <button onClick={() => setShowTruckManager(true)} className="bg-amber-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-amber-200">Verwalten</button>
               </div>
             </section>
 
             <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
               <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-black text-slate-800 uppercase text-sm">Bildschirm immer an</p>
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Verhindert Standby im LKW</p>
-                </div>
-                <button onClick={() => setState(p => ({...p, stayAwake: !p.stayAwake}))} className={`w-14 h-8 rounded-full p-1 transition-all ${state.stayAwake ? 'bg-amber-500' : 'bg-slate-300'}`}><div className={`w-6 h-6 rounded-full bg-white shadow-xl transition-transform ${state.stayAwake ? 'translate-x-6' : 'translate-x-0'}`}></div></button>
-              </div>
-            </section>
-
-            <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-black text-slate-800 uppercase text-sm">Material-Verwaltung</p>
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Eigene Materialien anlegen</p>
-                </div>
+                <div><p className="font-black text-slate-800 uppercase text-sm">Material-Verwaltung</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Eigene Materialien anlegen</p></div>
                 <button onClick={() => setShowMaterialManager(true)} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase">Anpassen</button>
               </div>
             </section>
 
-            <section className="bg-amber-50 p-6 rounded-[2rem] border border-amber-100 space-y-3">
-               <div className="flex items-center gap-3"><Icons.Globe className="text-amber-600 w-5 h-5" /><h4 className="font-black uppercase text-xs text-amber-800">Profi-Tipp für Hintergrund-Tracking</h4></div>
-               <p className="text-[10px] text-amber-700 font-medium leading-relaxed uppercase">Damit die App auch trackt, wenn du WhatsApp öffnest, deaktiviere die <b>„Akku-Optimierung“</b> für diese Seite.</p>
+            <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between">
+                <div><p className="font-black text-slate-800 uppercase text-sm">Bildschirm immer an</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Verhindert Standby im LKW</p></div>
+                <button onClick={() => setState(p => ({...p, stayAwake: !p.stayAwake}))} className={`w-14 h-8 rounded-full p-1 transition-all ${state.stayAwake ? 'bg-amber-500' : 'bg-slate-300'}`}><div className={`w-6 h-6 rounded-full bg-white shadow-xl transition-transform ${state.stayAwake ? 'translate-x-6' : 'translate-x-0'}`}></div></button>
+              </div>
             </section>
             
             <button onClick={() => {if(confirm('App komplett zurücksetzen? Alle Fuhren werden gelöscht!')){localStorage.clear(); window.location.reload();}}} className="w-full p-5 text-red-500 font-black text-sm border-2 border-red-50 rounded-2xl uppercase italic tracking-widest">Werkseinstellung (Löschen)</button>
@@ -1228,11 +1183,7 @@ const App: React.FC = () => {
       {showMaterialManager && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/90 backdrop-blur-md flex flex-col justify-end p-4">
            <div className="bg-white rounded-[2.5rem] p-8 space-y-6 w-full max-w-md mx-auto shadow-2xl animate-in slide-in-from-bottom-10">
-              <div className="flex justify-between items-center">
-                <h3 className="text-xl font-black italic uppercase text-slate-900">Materialien verwalten</h3>
-                <button onClick={() => setShowMaterialManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button>
-              </div>
-              
+              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">Materialien verwalten</h3><button onClick={() => setShowMaterialManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
               <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-1">
                 {state.materials.map(m => (
                     <div key={m.id} className="flex items-center gap-3 bg-slate-50 p-3 rounded-2xl border border-slate-100">
@@ -1242,7 +1193,6 @@ const App: React.FC = () => {
                     </div>
                 ))}
               </div>
-
               <div className="pt-4 border-t border-slate-100 space-y-2">
                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Neues Material hinzufügen</label>
                  <div className="flex gap-2">
@@ -1250,8 +1200,40 @@ const App: React.FC = () => {
                     <button onClick={handleAddCustomMaterial} className="bg-amber-500 text-white p-4 rounded-xl shadow-lg active:scale-90 transition-transform"><Icons.Plus className="w-6 h-6" /></button>
                  </div>
               </div>
-
               <button onClick={() => setShowMaterialManager(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Schliessen</button>
+           </div>
+        </div>
+      )}
+
+      {showTruckManager && (
+        <div className="fixed inset-0 z-[5000] bg-slate-900/90 backdrop-blur-md flex flex-col justify-end p-4">
+           <div className="bg-white rounded-[2.5rem] p-8 space-y-6 w-full max-w-md mx-auto shadow-2xl animate-in slide-in-from-bottom-10">
+              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">LKW-Fuhrpark</h3><button onClick={() => setShowTruckManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
+              <div className="space-y-3 max-h-[35vh] overflow-y-auto pr-1">
+                {state.trucks.map(t => (
+                    <div key={t.id} onClick={() => setState(p => ({...p, activeTruckId: t.id}))} className={`flex items-center gap-3 p-4 rounded-2xl border transition-all ${state.activeTruckId === t.id ? 'bg-amber-50 border-amber-500 shadow-md ring-2 ring-amber-200' : 'bg-white border-slate-200'}`}>
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${state.activeTruckId === t.id ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-400'}`}><Icons.Truck className="w-6 h-6" /></div>
+                        <div className="flex-1">
+                          <p className="font-black uppercase text-sm text-slate-900 leading-none mb-1">{t.name}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t.volume}m³ {t.plate ? `• ${t.plate}` : ''}</p>
+                        </div>
+                        {state.activeTruckId === t.id && <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>}
+                        <button onClick={(e) => {e.stopPropagation(); handleDeleteTruck(t.id);}} className="text-red-400 p-2"><Icons.Trash className="w-5 h-5" /></button>
+                    </div>
+                ))}
+              </div>
+              <div className="pt-4 border-t border-slate-100 space-y-4">
+                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">LKW hinzufügen</p>
+                 <div className="space-y-2">
+                    <input type="text" value={newTruckData.name} onChange={e => setNewTruckData({...newTruckData, name: e.target.value})} placeholder="NAME (Z.B. MEIN MAN 3-ACHSER)..." className="w-full bg-slate-100 p-3 rounded-xl font-black uppercase text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+                    <div className="flex gap-2">
+                      <input type="text" value={newTruckData.plate} onChange={e => setNewTruckData({...newTruckData, plate: e.target.value})} placeholder="KENNZEICHEN..." className="flex-1 bg-slate-100 p-3 rounded-xl font-black uppercase text-xs outline-none focus:ring-2 focus:ring-amber-500" />
+                      <input type="number" step="0.5" value={newTruckData.volume} onChange={e => setNewTruckData({...newTruckData, volume: e.target.value})} placeholder="m³" className="w-24 bg-slate-100 p-3 rounded-xl font-black text-center text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+                    </div>
+                    <button onClick={handleAddTruck} className="w-full bg-amber-500 text-white p-4 rounded-xl shadow-lg active:scale-95 transition-all font-black uppercase text-xs">Fahrzeug Speichern</button>
+                 </div>
+              </div>
+              <button onClick={() => setShowTruckManager(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Schliessen</button>
            </div>
         </div>
       )}
