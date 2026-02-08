@@ -8,7 +8,8 @@ const LOADING_ZONE_RADIUS_DEFAULT = 25;
 const DEFAULT_SITE_RADIUS = 200; 
 const DETECTION_DELAY_MS = 5000; 
 const RESET_COOLDOWN_MS = 3000; 
-const ACCURACY_THRESHOLD = 50; 
+const ACCURACY_THRESHOLD = 50; // Für "Gutes" Signal
+const CRITICAL_ACCURACY_THRESHOLD = 120; // Absolutes Limit für Auto-Erkennung
 
 const DEFAULT_MATERIALS: CustomMaterial[] = [
   { id: '1', name: 'Aushub', colorClass: 'bg-amber-600' },
@@ -121,6 +122,49 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state]);
 
+  // GPS Aggressives Tracking
+  useEffect(() => {
+    if (!("geolocation" in navigator)) {
+      setLocationError("Dein Browser unterstützt kein GPS.");
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        setLocationError(null);
+        const coords = { 
+          lat: pos.coords.latitude, 
+          lon: pos.coords.longitude,
+          accuracy: pos.coords.accuracy 
+        };
+        
+        setCurrentCoords(coords);
+        
+        if (mapRef.current && autoCenter && activeTab === 'track') {
+          mapRef.current.setView([coords.lat, coords.lon], mapRef.current.getZoom());
+        }
+      },
+      (err) => {
+        console.error("GPS Watch Error:", err);
+        setLocationError("GPS Signal schwach oder blockiert.");
+      },
+      { 
+        enableHighAccuracy: true, 
+        maximumAge: 0, 
+        timeout: 10000 
+      }
+    );
+
+    const refreshInterval = setInterval(() => {
+        setGpsRetryKey(k => k + 1);
+    }, 120000);
+
+    return () => {
+        navigator.geolocation.clearWatch(watchId);
+        clearInterval(refreshInterval);
+    };
+  }, [autoCenter, activeTab, gpsRetryKey]);
+
   useEffect(() => {
     let wakeLockSentinel: any = null;
 
@@ -128,11 +172,6 @@ const App: React.FC = () => {
       if ('wakeLock' in navigator && state.stayAwake) {
         try {
           wakeLockSentinel = await (navigator as any).wakeLock.request('screen');
-          wakeLockSentinel.addEventListener('release', () => {
-            if (state.stayAwake && document.visibilityState === 'visible') {
-              requestWakeLock();
-            }
-          });
         } catch (err) {
           console.error(`Wake Lock Fehler: ${err}`);
         }
@@ -150,13 +189,9 @@ const App: React.FC = () => {
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (wakeLockSentinel) {
-        wakeLockSentinel.release();
-        wakeLockSentinel = null;
-      }
+      if (wakeLockSentinel) wakeLockSentinel.release();
     };
   }, [state.stayAwake]);
 
@@ -169,38 +204,6 @@ const App: React.FC = () => {
       window.removeEventListener('offline', handleStatus);
     };
   }, []);
-
-  useEffect(() => {
-    if (!("geolocation" in navigator)) {
-      setLocationError("Dein Browser unterstützt kein GPS.");
-      return;
-    }
-
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        setLocationError(null);
-        const coords = { 
-          lat: pos.coords.latitude, 
-          lon: pos.coords.longitude,
-          accuracy: pos.coords.accuracy 
-        };
-        setCurrentCoords(coords);
-        if (mapRef.current && autoCenter && activeTab === 'track') {
-          mapRef.current.setView([coords.lat, coords.lon], mapRef.current.getZoom());
-        }
-      },
-      (err) => {
-        switch(err.code) {
-          case 1: setLocationError("Standortzugriff verweigert. Bitte in den Einstellungen erlauben."); break;
-          case 2: setLocationError("GPS Signal verloren oder GPS am Handy ist ausgeschaltet."); break;
-          case 3: setLocationError("GPS Zeitüberschreitung. Versuche es erneut."); break;
-          default: setLocationError("Unbekannter GPS-Fehler.");
-        }
-      },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, [activeTab, autoCenter, gpsRetryKey]);
 
   const handleGpsRetry = () => {
     setLocationError(null);
@@ -517,7 +520,9 @@ const App: React.FC = () => {
       
       mapRef.current = L.map(mapContainerRef.current, {
         zoomControl: false,
-        attributionControl: false
+        attributionControl: false,
+        fadeAnimation: true,
+        markerZoomAnimation: true
       }).setView([startLat, startLon], 16);
       
       markerLayerGroupRef.current = L.layerGroup().addTo(mapRef.current);
@@ -559,8 +564,14 @@ const App: React.FC = () => {
     const url = mapMode === 'standard' 
       ? 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
       : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-    const attribution = mapMode === 'satellite' ? 'Tiles &copy; Esri' : '&copy; OpenStreetMap';
-    tileLayerRef.current = L.tileLayer(url, { attribution, maxZoom: 19 }).addTo(mapRef.current);
+    
+    tileLayerRef.current = L.tileLayer(url, { 
+      maxZoom: 19,
+      keepBuffer: 8,
+      updateWhenIdle: false,
+      updateWhenZooming: true,
+      crossOrigin: true
+    }).addTo(mapRef.current);
   }, [mapMode, activeTab]);
 
   useEffect(() => {
@@ -648,7 +659,7 @@ const App: React.FC = () => {
   }, [activeAutoLoadId]);
 
   useEffect(() => {
-    if (!currentCoords || !state.autoCountEnabled || currentCoords.accuracy > ACCURACY_THRESHOLD) return;
+    if (!currentCoords || !state.autoCountEnabled || currentCoords.accuracy > CRITICAL_ACCURACY_THRESHOLD) return;
     
     let detectedPoint: { p: LoadingPoint, s: Site } | null = null;
     
@@ -656,7 +667,9 @@ const App: React.FC = () => {
       for (const point of site.loadingPoints) {
         const dist = calculateDistance(currentCoords.lat, currentCoords.lon, point.latitude, point.longitude);
         const pointRadius = point.radius || LOADING_ZONE_RADIUS_DEFAULT;
-        if (dist < pointRadius) {
+        const toleranceRadius = currentCoords.accuracy > ACCURACY_THRESHOLD ? pointRadius * 1.5 : pointRadius;
+        
+        if (dist < toleranceRadius) {
           detectedPoint = { p: point, s: site };
           break outer;
         }
@@ -713,6 +726,7 @@ const App: React.FC = () => {
 
   const activeLoadData = useMemo(() => activeAutoLoadId ? state.loads.find(l => l.id === activeAutoLoadId) : null, [activeAutoLoadId, state.loads]);
   const activeSiteData = useMemo(() => activeLoadData ? state.sites.find(s => s.id === activeLoadData.siteId) : null, [activeLoadData, state.sites]);
+  
   const editingLoadData = useMemo(() => editingLoadId ? state.loads.find(l => l.id === editingLoadId) : null, [editingLoadId, state.loads]);
   const editingPointData = useMemo(() => {
     if (!editingPoint) return null;
@@ -729,7 +743,6 @@ const App: React.FC = () => {
     yesterdayDate.setDate(now.getDate() - 1);
     const startOfYesterday = new Date(yesterdayDate.getFullYear(), yesterdayDate.getMonth(), yesterdayDate.getDate()).getTime();
     const endOfYesterday = startOfToday - 1;
-    
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     const startOfWeek = new Date(new Date(now).setDate(diff)).setHours(0,0,0,0);
@@ -746,7 +759,6 @@ const App: React.FC = () => {
   const filteredStatsBySite = useMemo(() => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    
     const day = now.getDay();
     const diff = now.getDate() - day + (day === 0 ? -6 : 1);
     const startOfWeek = new Date(new Date(now).setDate(diff)).setHours(0,0,0,0);
@@ -827,122 +839,117 @@ const App: React.FC = () => {
       )}
 
       {editingLoadData && (
-        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-4 bg-slate-900/40 backdrop-blur-sm overflow-hidden">
-          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[95vh] border-4 border-slate-900 animate-in slide-in-from-bottom-10 duration-300">
-            <div className="overflow-y-auto w-full">
-              <div className="bg-slate-900 p-5 text-white">
-                <div className="flex justify-between items-center mb-2">
-                  <div>
-                    <h2 className="text-xl font-black italic uppercase text-amber-500">FUHRE BEARBEITEN</h2>
-                    <p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">Nachträgliche Korrektur</p>
+        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-hidden">
+          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[92vh] border-4 border-slate-900 animate-in slide-in-from-bottom-10 duration-300 overflow-hidden">
+            <div className="bg-slate-900 p-5 text-white shrink-0">
+              <div className="flex justify-between items-center mb-2">
+                <div>
+                  <h2 className="text-xl font-black italic uppercase text-amber-500">FUHRE BEARBEITEN</h2>
+                  <p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">Nachträgliche Korrektur</p>
+                </div>
+                <Icons.Edit className="w-8 h-8 text-amber-500" />
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material ändern</span>
+                  <div className="flex flex-wrap gap-2">
+                    {state.materials.map(m => (
+                        <button 
+                            key={m.id} 
+                            onClick={() => handleUpdateLoadMaterial(editingLoadId!, m.name)}
+                            className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${editingLoadData.material === m.name ? `${m.colorClass} text-white shadow-md` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
+                        >
+                            {m.name}
+                        </button>
+                    ))}
                   </div>
-                  <Icons.Edit className="w-8 h-8 text-amber-500" />
+                </div>
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW wechseln</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {state.trucks.map(t => (
+                      <button key={t.id} onClick={() => switchTruckForLoad(editingLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${editingLoadData.truckId === t.id ? `${getMaterialColor(editingLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name} ({t.volume}m³)</button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="p-6 space-y-5">
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material ändern</span>
-                    <div className="flex flex-wrap gap-2">
-                      {state.materials.map(m => (
-                          <button 
-                              key={m.id} 
-                              onClick={() => handleUpdateLoadMaterial(editingLoadId!, m.name)}
-                              className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${editingLoadData.material === m.name ? `${m.colorClass} text-white shadow-md` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
-                          >
-                              {m.name}
-                          </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW wechseln</span>
-                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto pr-1">
-                      {state.trucks.map(t => (
-                        <button key={t.id} onClick={() => switchTruckForLoad(editingLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${editingLoadData.truckId === t.id ? `${getMaterialColor(editingLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name} ({t.volume}m³)</button>
-                      ))}
-                    </div>
-                  </div>
+              <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
+                <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge korrigieren</p>
+                <div className="flex items-center justify-between">
+                  <button onClick={() => adjustVolume(editingLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
+                  <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{editingLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(editingLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
+                  <button onClick={() => adjustVolume(editingLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
                 </div>
-                <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
-                  <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge korrigieren</p>
-                  <div className="flex items-center justify-between">
-                    <button onClick={() => adjustVolume(editingLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
-                    <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{editingLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(editingLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
-                    <button onClick={() => adjustVolume(editingLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
-                  </div>
-                </div>
-                <div className="pt-2 pb-2"><button onClick={() => setEditingLoadId(null)} className={`w-full py-5 rounded-2xl ${getMaterialColor(editingLoadData.material)} text-white font-black uppercase text-base shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all border-b-4 border-black/20`}>Änderungen Speichern</button></div>
               </div>
+              <div className="pt-2 pb-4"><button onClick={() => setEditingLoadId(null)} className={`w-full py-5 rounded-2xl ${getMaterialColor(editingLoadData.material)} text-white font-black uppercase text-base shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all border-b-4 border-black/20`}>Speichern</button></div>
             </div>
           </div>
         </div>
       )}
 
       {activeLoadData && (
-        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-4 bg-slate-900/40 backdrop-blur-sm overflow-hidden">
-          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[95vh] border-4 border-amber-500 animate-in slide-in-from-bottom-10 duration-300">
-            <div className="overflow-y-auto w-full">
-              <div className="bg-slate-900 p-5 text-white">
-                <div className="flex justify-between items-center mb-3">
-                  <div><h2 className="text-xl font-black italic uppercase text-amber-500">BELADUNG AKTIV</h2><p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">LKW wird beladen</p></div>
-                  <Icons.Truck className="w-8 h-8 text-amber-500 animate-bounce" />
+        <div className="fixed inset-0 z-[5000] flex flex-col justify-end p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm overflow-hidden">
+          <div className="bg-white w-full rounded-[2.5rem] shadow-2xl flex flex-col max-h-[92vh] border-4 border-amber-500 animate-in slide-in-from-bottom-10 duration-300 overflow-hidden">
+            <div className="bg-slate-900 p-5 text-white shrink-0">
+              <div className="flex justify-between items-center mb-3">
+                <div><h2 className="text-xl font-black italic uppercase text-amber-500">BELADUNG AKTIV</h2><p className="text-[10px] font-bold uppercase opacity-60 tracking-widest leading-tight">LKW wird beladen</p></div>
+                <Icons.Truck className="w-8 h-8 text-amber-500 animate-bounce" />
+              </div>
+              <div className="bg-slate-800 p-3 rounded-2xl border border-slate-700 flex items-center gap-3">
+                <Icons.Building className="w-4 h-4 text-amber-500" />
+                <div className="flex-1"><p className="text-[8px] font-black text-slate-500 uppercase tracking-widest leading-none mb-1">Baustelle</p><input type="text" value={activeSiteData?.name || ''} onChange={(e) => handleRenameSite(activeLoadData.siteId, e.target.value)} placeholder="NAME EINGEBEN..." className="w-full bg-transparent border-none text-white font-black uppercase text-sm outline-none focus:text-amber-400 placeholder:text-slate-600" /></div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material</span>
+                  <div className="flex flex-wrap gap-2">
+                    {state.materials.map(m => (
+                      <button 
+                        key={m.id} 
+                        onClick={() => handleUpdateLoadMaterial(activeAutoLoadId!, m.name)}
+                        className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeLoadData.material === m.name ? `${m.colorClass} text-white shadow-md ring-2 ring-white ring-offset-1` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
+                      >
+                        {m.name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="bg-slate-800 p-3 rounded-2xl border border-slate-700 flex items-center gap-3">
-                  <Icons.Building className="w-4 h-4 text-amber-500" />
-                  <div className="flex-1"><p className="text-[8px] font-black text-slate-500 uppercase tracking-widest leading-none mb-1">Baustelle benennen</p><input type="text" value={activeSiteData?.name || ''} onChange={(e) => handleRenameSite(activeLoadData.siteId, e.target.value)} placeholder="NAME EINGEBEN..." className="w-full bg-transparent border-none text-white font-black uppercase text-sm outline-none focus:text-amber-400 placeholder:text-slate-600" /></div>
-                  <Icons.Edit className="w-3 h-3 text-slate-600" />
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {state.trucks.map(t => (
+                      <button key={t.id} onClick={() => switchTruckForLoad(activeAutoLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${activeLoadData.truckId === t.id ? `${getMaterialColor(activeLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name}</button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="p-6 space-y-5">
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">Material korrigieren</span>
-                    <div className="flex flex-wrap gap-2">
-                      {state.materials.map(m => (
-                        <button 
-                          key={m.id} 
-                          onClick={() => handleUpdateLoadMaterial(activeAutoLoadId!, m.name)}
-                          className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase transition-all ${activeLoadData.material === m.name ? `${m.colorClass} text-white shadow-md ring-2 ring-white ring-offset-1` : 'bg-slate-50 text-slate-400 border border-slate-200'}`}
-                        >
-                          {m.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">LKW wechseln</span>
-                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto pr-1">
-                      {state.trucks.map(t => (
-                        <button key={t.id} onClick={() => switchTruckForLoad(activeAutoLoadId!, t.id)} className={`py-2 px-1 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${activeLoadData.truckId === t.id ? `${getMaterialColor(activeLoadData.material)} border-transparent text-white shadow-lg` : 'bg-slate-50 border-slate-200 text-slate-400'}`}>{t.name}</button>
-                      ))}
-                    </div>
-                  </div>
+              <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
+                <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge</p>
+                <div className="flex items-center justify-between">
+                  <button onClick={() => adjustVolume(activeAutoLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
+                  <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{activeLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(activeLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
+                  <button onClick={() => adjustVolume(activeAutoLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
                 </div>
-                <div className="bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-100">
-                  <p className="text-center text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-2">Menge korrigieren</p>
-                  <div className="flex items-center justify-between">
-                    <button onClick={() => adjustVolume(activeAutoLoadId!, -0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">-</span></button>
-                    <div className="text-center"><span className="text-5xl font-black italic text-slate-900">{activeLoadData.volume.toFixed(1)}</span><span className={`text-lg font-black ml-1 uppercase italic ${getMaterialColor(activeLoadData.material).replace('bg-', 'text-')}`}>m³</span></div>
-                    <button onClick={() => adjustVolume(activeAutoLoadId!, 0.5)} className="w-12 h-12 rounded-xl bg-white shadow-md flex items-center justify-center active:scale-90 transition-transform border border-slate-200"><span className="text-2xl font-black text-slate-900">+</span></button>
-                  </div>
+              </div>
+              
+              <div className="pt-2 space-y-4 pb-6">
+                <div className="grid grid-cols-2 gap-3">
+                  <button onClick={() => setActiveAutoLoadId(null)} className="py-5 rounded-2xl bg-slate-100 text-slate-600 font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-slate-300">ZUR KARTE</button>
+                  <button onClick={finalizeAndPrepareNext} className={`py-5 rounded-2xl ${getMaterialColor(activeLoadData.material)} text-white font-black uppercase text-sm shadow-xl active:scale-95 transition-all border-b-4 border-black/30 flex items-center justify-center gap-2`}><Icons.Plus className="w-5 h-5" /> FERTIG</button>
                 </div>
-                
-                <div className="pt-2 space-y-4 pb-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <button onClick={() => setActiveAutoLoadId(null)} className="py-5 rounded-2xl bg-slate-100 text-slate-600 font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-slate-300 flex items-center justify-center gap-2"><Icons.Globe className="w-5 h-5" /> ZU KARTE</button>
-                    <button onClick={finalizeAndPrepareNext} className={`py-5 rounded-2xl ${getMaterialColor(activeLoadData.material)} text-white font-black uppercase text-sm shadow-lg active:scale-95 transition-all border-b-4 border-black/20 flex items-center justify-center gap-2`}><Icons.Plus className="w-5 h-5" /> FERTIG</button>
-                  </div>
-                  <div className="relative">
-                    {!showConfirmCancel ? (
-                      <button onClick={() => setShowConfirmCancel(true)} className="w-full py-4 rounded-xl bg-red-100 text-red-700 font-black uppercase text-[10px] border border-red-200 active:scale-95 transition-all flex items-center justify-center gap-2 shadow-sm"><Icons.Trash className="w-4 h-4" /> Fuhre abbrechen (löschen)</button>
-                    ) : (
-                      <div className="flex gap-2 animate-in zoom-in-95 duration-200">
-                         <button onClick={() => setShowConfirmCancel(false)} className="flex-1 py-4 rounded-xl bg-slate-100 text-slate-600 font-black uppercase text-[10px] border border-slate-200">Abbrechen</button>
-                        <button onClick={cancelActiveLoad} className="flex-[2] py-4 rounded-xl bg-red-600 text-white font-black uppercase text-[10px] border-b-4 border-red-800 shadow-xl flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> JA, DIESE FUHRE LÖSCHEN!</button>
-                      </div>
-                    )}
-                  </div>
+                <div className="relative">
+                  {!showConfirmCancel ? (
+                    <button onClick={() => setShowConfirmCancel(true)} className="w-full py-4 rounded-xl bg-red-100 text-red-700 font-black uppercase text-[10px] border border-red-200 flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> Fuhre abbrechen</button>
+                  ) : (
+                    <div className="flex gap-2 animate-in zoom-in-95 duration-200">
+                       <button onClick={() => setShowConfirmCancel(false)} className="flex-1 py-4 rounded-xl bg-slate-100 text-slate-600 font-black uppercase text-[10px]">Zurück</button>
+                      <button onClick={cancelActiveLoad} className="flex-[2] py-4 rounded-xl bg-red-600 text-white font-black uppercase text-[10px] border-b-4 border-red-800 shadow-xl flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> JA, LÖSCHEN!</button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -956,10 +963,18 @@ const App: React.FC = () => {
             <Icons.Logo className="w-10 h-10 drop-shadow-lg" />
             <div>
               <h1 className="text-xl font-black italic text-amber-500 tracking-tighter leading-none">KIPPERLOG</h1>
-              <div className="flex items-center gap-1.5"><span className="text-[10px] font-black text-white uppercase tracking-[0.3em] opacity-80">PRO</span>{state.stayAwake && <div className="animate-pulse bg-green-500 w-1.5 h-1.5 rounded-full" title="Wach-Modus aktiv"></div>}</div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black text-white uppercase tracking-[0.3em] opacity-80">PRO</span>
+                {currentCoords && (
+                    <div className="flex items-center gap-1">
+                        <div className={`w-2 h-2 rounded-full ${currentCoords.accuracy <= ACCURACY_THRESHOLD ? 'bg-green-500' : currentCoords.accuracy <= CRITICAL_ACCURACY_THRESHOLD ? 'bg-yellow-500 animate-pulse' : 'bg-red-500 animate-ping'}`}></div>
+                        <span className={`text-[8px] font-black uppercase tracking-widest ${currentCoords.accuracy > ACCURACY_THRESHOLD ? 'text-yellow-500' : 'text-slate-400'}`}>{Math.round(currentCoords.accuracy)}m {currentCoords.accuracy > ACCURACY_THRESHOLD ? '(SCHWACH)' : ''}</span>
+                    </div>
+                )}
+              </div>
             </div>
           </div>
-          <button onClick={cycleTotalDisplay} className="text-right group active:scale-95 transition-transform bg-slate-800/50 px-4 py-2 rounded-2xl border border-slate-700 hover:border-amber-500">
+          <button onClick={cycleTotalDisplay} className="text-right group active:scale-95 transition-transform bg-slate-800/50 px-4 py-2 rounded-2xl border border-slate-700">
             <span className="text-2xl font-black text-white">{summaryVolume.toFixed(1)}</span>
             <div className="flex items-center justify-end gap-1.5"><span className="text-[10px] block text-amber-500 font-black uppercase leading-none">{totalLabel}</span><Icons.History className="w-2.5 h-2.5 text-slate-500 group-hover:text-amber-500" /></div>
           </button>
@@ -971,11 +986,14 @@ const App: React.FC = () => {
           <div className="h-full w-full flex flex-col relative">
             <div className="absolute inset-0 z-[10]"><div ref={mapContainerRef} className="h-full w-full"></div></div>
 
-            {currentCoords && (
-                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1005]">
-                    <div className={`px-4 py-1.5 rounded-full backdrop-blur-md border shadow-lg text-[9px] font-black uppercase tracking-wider flex items-center gap-2 ${currentCoords.accuracy > ACCURACY_THRESHOLD ? 'bg-red-500/80 border-red-400 text-white animate-pulse' : 'bg-white/80 border-slate-200 text-slate-600'}`}>
-                        <Icons.MapPin className="w-3 h-3" />
-                        <span>Genauigkeit: {Math.round(currentCoords.accuracy)}m {currentCoords.accuracy > ACCURACY_THRESHOLD ? '(STÖRSIGNAL)' : ''}</span>
+            {currentCoords && currentCoords.accuracy > CRITICAL_ACCURACY_THRESHOLD && (
+                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[1005] w-[90%]">
+                    <div className="px-4 py-3 rounded-2xl backdrop-blur-md bg-red-600/90 border-2 border-white text-white shadow-2xl flex flex-col items-center gap-1 animate-in slide-in-from-top-4">
+                        <div className="flex items-center gap-2">
+                            <Icons.MapPin className="w-5 h-5 animate-bounce" />
+                            <span className="text-[10px] font-black uppercase tracking-wider">Signalsuche im Gang...</span>
+                        </div>
+                        <p className="text-[8px] font-bold opacity-80 uppercase">In Gruben/Hallen kann das Signal bis zu 2 Min. dauern</p>
                     </div>
                 </div>
             )}
@@ -992,88 +1010,10 @@ const App: React.FC = () => {
                 <Icons.Globe className={`w-5 h-5 mb-1 ${mapMode === 'satellite' ? 'text-white' : 'text-slate-600'}`} /><span className="text-[8px] font-black uppercase">{mapMode === 'satellite' ? 'Karte' : 'Satellit'}</span>
               </button>
               <button onClick={() => setAutoCenter(!autoCenter)} className={`p-3 rounded-2xl shadow-2xl active:scale-95 transition-transform flex flex-col items-center justify-center min-w-[75px] border ${autoCenter ? 'bg-blue-500 border-blue-600 text-white' : 'bg-white border-slate-200 text-slate-400'}`}>
-                <Icons.MapPin className={`w-5 h-5 mb-1 ${autoCenter ? 'text-white' : 'text-slate-400'}`} /><span className="text-[8px] font-black uppercase">GPS</span>
+                <Icons.MapPin className={`w-5 h-5 mb-1 ${autoCenter ? 'text-white' : 'text-slate-400'}`} /><span className="text-[8px] font-black uppercase">FOLGEN</span>
               </button>
             </div>
             {!isOnline && <div className="absolute top-4 left-4 z-[1005]"><div className="bg-red-600 text-white px-3 py-1.5 rounded-xl shadow-xl text-[10px] font-black uppercase animate-pulse border-2 border-white">Offline-Modus</div></div>}
-            <div className="absolute bottom-6 left-4 right-4 z-[1005]"><div className={`p-3 rounded-2xl backdrop-blur-sm text-center shadow-lg border transition-all ${!isMapLocked ? 'bg-amber-600/90 text-white border-white scale-105' : 'bg-white/90 text-slate-800 border-slate-200'}`}><p className="text-[10px] font-black uppercase tracking-widest leading-tight">{!isMapLocked ? 'Symbol ziehen zum Verschieben' : 'Auf Karte tippen, um Bagger zu setzen'}</p></div></div>
-          </div>
-        )}
-
-        {editingSite && (
-          <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
-            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500">
-               <h3 className="text-xl font-black italic uppercase text-slate-900 flex items-center gap-2"><Icons.Building className="text-amber-500" /> Baustelle verwalten</h3>
-               <div className="space-y-4">
-                 <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name ändern</label><input defaultValue={state.sites.find(s => s.id === editingSite)?.name} onBlur={(e) => handleRenameSite(editingSite, e.target.value)} placeholder="NAME..." className="w-full bg-slate-100 p-4 rounded-2xl font-black text-lg uppercase outline-none focus:ring-4 focus:ring-amber-500/20" /></div>
-                 <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                   <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Baustellen-Radius</label><span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS)}m</span></div>
-                   <input type="range" min="50" max="1000" step="10" value={state.sites.find(s => s.id === editingSite)?.radius || DEFAULT_SITE_RADIUS} onChange={(e) => handleUpdateSiteRadius(editingSite, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
-                   <div className="flex justify-between text-[8px] font-black text-slate-400 uppercase"><span>50m</span><span>500m</span><span>1000m</span></div>
-                 </div>
-               </div>
-               <div className="grid grid-cols-1 gap-2 pt-4">
-                 <button onClick={() => { setEditingSite(null); setSiteDeleteConfirm(false); }} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Fertig</button>
-                 <div className="pt-2">
-                   {!siteDeleteConfirm ? (
-                     <button onClick={() => setSiteDeleteConfirm(true)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4"/> Baustelle löschen</button>
-                   ) : (
-                     <div className="flex flex-col gap-2 animate-in zoom-in-95 duration-200">
-                        <button onClick={() => setSiteDeleteConfirm(false)} className="w-full py-3 bg-slate-100 text-slate-600 font-black uppercase text-[10px] rounded-xl">Abbrechen</button>
-                        <button onClick={() => handleDeleteSite(editingSite)} className="w-full py-4 bg-red-600 text-white font-black uppercase text-xs rounded-xl shadow-xl border-b-4 border-red-800 flex items-center justify-center gap-2"><Icons.Trash className="w-4 h-4" /> JA, ENDGÜLTIG LÖSCHEN!</button>
-                     </div>
-                   )}
-                 </div>
-               </div>
-            </div>
-          </div>
-        )}
-
-        {editingPoint && editingPointData && (
-          <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
-            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500 overflow-y-auto max-h-[90vh]">
-              <div className="flex justify-between items-start">
-                  <div><h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3><p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-1">Einstellungen anpassen</p></div>
-                  <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white ${getMaterialColor(editingPointData.material)} shadow-lg`}><Icons.Truck className="w-6 h-6" /></div>
-              </div>
-              <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bagger-Radius (Fangbereich)</label><span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT)}m</span></div>
-                <input type="range" min="10" max="150" step="5" value={editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT} onChange={(e) => handleUpdatePointRadius(editingPoint.siteId, editingPoint.pointId, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
-                <div className="flex justify-between text-[8px] font-black text-slate-400 uppercase"><span>10m (Präzise)</span><span>150m (Groß)</span></div>
-              </div>
-              <div className="space-y-2">
-                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material ändern</label>
-                 <div className="grid grid-cols-1 gap-2 max-h-[30vh] overflow-y-auto pr-1">
-                  {state.materials.map(m => (
-                    <button key={m.id} onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center transition-all ${m.name === editingPointData.material ? `${m.colorClass} shadow-lg scale-[1.02] border-2 border-white` : 'bg-slate-300 opacity-60'}`}><span>{m.name.toUpperCase()}</span>{m.name === editingPointData.material && <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>}</button>
-                  ))}
-                 </div>
-              </div>
-              <div className="grid grid-cols-1 gap-2 pt-2"><button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm shadow-lg active:scale-95 transition-all">Fertig</button><button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2 hover:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button></div>
-            </div>
-          </div>
-        )}
-
-        {showMaterialPicker && (
-          <div className="fixed inset-0 z-[4000] bg-slate-900/95 backdrop-blur-md flex flex-col justify-end p-4">
-            <div className="bg-white rounded-[2.5rem] p-8 space-y-6 max-w-md mx-auto w-full shadow-2xl">
-              <div className="flex justify-between items-center"><h3 className="text-2xl font-black italic uppercase text-slate-900">{state.activeSiteId ? 'Neuer Bagger' : 'Neue Baustelle'}</h3><button onClick={() => {setShowMaterialPicker(false); setPendingPointCoords(null);}} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
-              {!state.activeSiteId && (
-                <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name der neuen Baustelle</label>
-                  <input autoFocus type="text" value={newSiteName} onChange={e => setNewSiteName(e.target.value)} placeholder="Z.B. HAUPTSTRASSE..." className="w-full bg-slate-100 p-5 rounded-2xl text-lg font-black uppercase outline-none border-2 border-transparent focus:border-amber-500" />
-                </div>
-              )}
-              <div className="space-y-2">
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material für Bagger wählen</label>
-                <div className="grid grid-cols-1 gap-2 max-h-[40vh] overflow-y-auto pr-1">
-                  {state.materials.map(m => (
-                    <button key={m.id} onClick={() => handleCreateSiteAndPoint(m.name)} className={`w-full p-5 rounded-2xl text-white font-black text-lg text-left flex justify-between items-center shadow-md active:scale-95 transition-transform ${m.colorClass}`}><span>{m.name.toUpperCase()}</span><Icons.Plus className="w-6 h-6" /></button>
-                  ))}
-                </div>
-              </div>
-              <button onClick={() => {setShowMaterialPicker(false); setPendingPointCoords(null);}} className="w-full py-2 text-slate-400 font-bold uppercase text-xs">Abbrechen</button>
-            </div>
           </div>
         )}
 
@@ -1104,28 +1044,26 @@ const App: React.FC = () => {
                       </div>
                     ) : (
                       <div className="flex items-center gap-1">
-                        <button onClick={(e) => { e.stopPropagation(); setEditingLoadId(load.id); }} className="p-4 text-slate-400 hover:text-slate-900 active:bg-slate-50 rounded-xl transition-colors" title="Bearbeiten"><Icons.Edit className="w-6 h-6"/></button>
-                        <button onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(load.id); }} className="p-4 text-slate-300 hover:text-red-500 active:bg-red-50 rounded-xl transition-colors" title="Löschen"><Icons.Trash className="w-6 h-6"/></button>
+                        <button onClick={(e) => { e.stopPropagation(); setEditingLoadId(load.id); }} className="p-4 text-slate-400 hover:text-slate-900 active:bg-slate-50 rounded-xl transition-colors"><Icons.Edit className="w-6 h-6"/></button>
+                        <button onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(load.id); }} className="p-4 text-slate-300 hover:text-red-500 active:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-6 h-6"/></button>
                       </div>
                     )}
                   </div>
                 </div>
               ))}
-              {filteredHistoryLoads.length === 0 && <div className="text-center py-20 bg-white rounded-[3rem] border-2 border-dashed border-slate-200"><div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-200"><Icons.History className="w-8 h-8" /></div><p className="text-slate-400 font-black uppercase text-[10px] tracking-widest">Keine Fuhren in diesem Zeitraum</p></div>}
             </div>
           </div>
         )}
-
+        
         {activeTab === 'stats' && (
           <div className="p-4 space-y-4">
-            <h2 className="text-2xl font-black italic uppercase tracking-tighter">Mengen-Statistik</h2>
+            <h2 className="text-2xl font-black italic uppercase tracking-tighter">Mengen</h2>
             <div className="sticky top-0 z-[1050] bg-slate-100 pb-2 space-y-2">
               <div className="flex bg-slate-200 p-1 rounded-2xl overflow-x-auto gap-1 no-scrollbar">
                 {[{ id: 'today', label: 'Heute' }, { id: 'week', label: 'Woche' }, { id: 'day', label: 'Datum' }, { id: 'all', label: 'Alle' }].map(f => (
                   <button key={f.id} onClick={() => setStatsFilter(f.id as any)} className={`flex-1 min-w-[70px] py-2.5 rounded-xl text-[10px] font-black uppercase transition-all ${statsFilter === f.id ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-500'}`}>{f.label}</button>
                 ))}
               </div>
-              {statsFilter === 'day' && <div className="animate-in slide-in-from-top-2 duration-200"><div className="bg-white p-3 rounded-2xl border border-slate-200 flex items-center gap-3"><input type="date" value={selectedStatsDate} onChange={(e) => setSelectedStatsDate(e.target.value)} className="flex-1 bg-transparent border-none text-sm font-black uppercase outline-none" /><Icons.History className="w-4 h-4 text-slate-300" /></div></div>}
             </div>
             {Object.entries(filteredStatsBySite).length > 0 ? (
               <div className="space-y-6 animate-in fade-in duration-300">
@@ -1140,12 +1078,11 @@ const App: React.FC = () => {
                         </div>
                       ) : null)}
                     </div>
-                    <div className="bg-slate-50 p-4 text-right border-t border-slate-100"><span className="text-[10px] font-black text-slate-400 uppercase mr-2">Zeitraum Summe:</span><span className="text-xl font-black text-slate-900 italic">{Object.values(siteData.materials as Record<string, any>).reduce((s: number, d: any) => s + d.volume, 0).toFixed(1)} m³</span></div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="bg-white p-12 rounded-[3rem] text-center border-2 border-dashed border-slate-200"><div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Icons.Chart className="w-8 h-8" /></div><h4 className="text-slate-900 font-black uppercase text-sm mb-1">Keine Daten gefunden</h4><p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">In diesem Zeitraum wurden keine Fuhren erfasst.</p></div>
+              <div className="bg-white p-12 rounded-[3rem] text-center border-2 border-dashed border-slate-200"><p className="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Keine Daten</p></div>
             )}
           </div>
         )}
@@ -1153,54 +1090,65 @@ const App: React.FC = () => {
         {activeTab === 'settings' && (
           <div className="p-4 space-y-6">
             <h2 className="text-2xl font-black italic uppercase tracking-tighter">System</h2>
-            
             <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
               <div className="flex items-center justify-between">
-                <div><p className="font-black text-slate-800 uppercase text-sm">LKW-Fuhrpark</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{state.trucks.length} Fahrzeuge angelegt</p></div>
+                <div><p className="font-black text-slate-800 uppercase text-sm">Fuhrpark</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{state.trucks.length} LKW</p></div>
                 <button onClick={() => setShowTruckManager(true)} className="bg-amber-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase shadow-lg shadow-amber-200">Verwalten</button>
               </div>
             </section>
-
             <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
               <div className="flex items-center justify-between">
-                <div><p className="font-black text-slate-800 uppercase text-sm">Material-Verwaltung</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Eigene Materialien anlegen</p></div>
+                <div><p className="font-black text-slate-800 uppercase text-sm">Materialien</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Liste bearbeiten</p></div>
                 <button onClick={() => setShowMaterialManager(true)} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase">Anpassen</button>
               </div>
             </section>
-
             <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 space-y-4">
               <div className="flex items-center justify-between">
-                <div><p className="font-black text-slate-800 uppercase text-sm">Bildschirm immer an</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Verhindert Standby im LKW</p></div>
+                <div><p className="font-black text-slate-800 uppercase text-sm">Wach-Modus</p><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Bildschirm bleibt an</p></div>
                 <button onClick={() => setState(p => ({...p, stayAwake: !p.stayAwake}))} className={`w-14 h-8 rounded-full p-1 transition-all ${state.stayAwake ? 'bg-amber-500' : 'bg-slate-300'}`}><div className={`w-6 h-6 rounded-full bg-white shadow-xl transition-transform ${state.stayAwake ? 'translate-x-6' : 'translate-x-0'}`}></div></button>
               </div>
             </section>
-            
-            <button onClick={() => {if(confirm('App komplett zurücksetzen? Alle Fuhren werden gelöscht!')){localStorage.clear(); window.location.reload();}}} className="w-full p-5 text-red-500 font-black text-sm border-2 border-red-50 rounded-2xl uppercase italic tracking-widest">Werkseinstellung (Löschen)</button>
           </div>
         )}
       </main>
 
+      {showMaterialPicker && (
+          <div className="fixed inset-0 z-[4000] bg-slate-900/95 backdrop-blur-md flex flex-col justify-end p-4">
+            <div className="bg-white rounded-[2.5rem] p-8 space-y-6 max-w-md mx-auto w-full shadow-2xl">
+              <div className="flex justify-between items-center"><h3 className="text-2xl font-black italic uppercase text-slate-900">{state.activeSiteId ? 'Neuer Bagger' : 'Neue Baustelle'}</h3><button onClick={() => {setShowMaterialPicker(false); setPendingPointCoords(null);}} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
+              {!state.activeSiteId && (
+                <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Baustellenname</label>
+                  <input autoFocus type="text" value={newSiteName} onChange={e => setNewSiteName(e.target.value)} placeholder="HAUPTSTRASSE..." className="w-full bg-slate-100 p-5 rounded-2xl text-lg font-black uppercase outline-none border-2 border-transparent focus:border-amber-500" />
+                </div>
+              )}
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material</label>
+                <div className="grid grid-cols-1 gap-2 max-h-[40vh] overflow-y-auto pr-1">
+                  {state.materials.map(m => (
+                    <button key={m.id} onClick={() => handleCreateSiteAndPoint(m.name)} className={`w-full p-5 rounded-2xl text-white font-black text-lg text-left flex justify-between items-center shadow-md active:scale-95 transition-transform ${m.colorClass}`}><span>{m.name.toUpperCase()}</span><Icons.Plus className="w-6 h-6" /></button>
+                  ))}
+                </div>
+              </div>
+              <button onClick={() => {setShowMaterialPicker(false); setPendingPointCoords(null);}} className="w-full py-2 text-slate-400 font-bold uppercase text-xs">Abbrechen</button>
+            </div>
+          </div>
+        )}
+
       {showMaterialManager && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/90 backdrop-blur-md flex flex-col justify-end p-4">
            <div className="bg-white rounded-[2.5rem] p-8 space-y-6 w-full max-w-md mx-auto shadow-2xl animate-in slide-in-from-bottom-10">
-              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">Materialien verwalten</h3><button onClick={() => setShowMaterialManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
+              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">Materialien</h3><button onClick={() => setShowMaterialManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
               <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-1">
                 {state.materials.map(m => (
                     <div key={m.id} className="flex items-center gap-3 bg-slate-50 p-3 rounded-2xl border border-slate-100">
-                        <div className={`w-8 h-8 rounded-lg ${m.colorClass} shadow-sm`}></div>
+                        <div className={`w-8 h-8 rounded-lg ${m.colorClass}`}></div>
                         <span className="flex-1 font-black uppercase text-sm">{m.name}</span>
                         <button onClick={() => handleDeleteMaterial(m.id)} className="text-red-400 p-2"><Icons.Trash className="w-5 h-5" /></button>
                     </div>
                 ))}
               </div>
-              <div className="pt-4 border-t border-slate-100 space-y-2">
-                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Neues Material hinzufügen</label>
-                 <div className="flex gap-2">
-                    <input type="text" value={newMaterialName} onChange={e => setNewMaterialName(e.target.value)} placeholder="Z.B. FROSTSCHUTZ..." className="flex-1 bg-slate-100 p-4 rounded-xl font-black uppercase text-sm outline-none focus:ring-2 focus:ring-amber-500" />
-                    <button onClick={handleAddCustomMaterial} className="bg-amber-500 text-white p-4 rounded-xl shadow-lg active:scale-90 transition-transform"><Icons.Plus className="w-6 h-6" /></button>
-                 </div>
-              </div>
-              <button onClick={() => setShowMaterialManager(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Schliessen</button>
+              <button onClick={() => setShowMaterialManager(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Fertig</button>
            </div>
         </div>
       )}
@@ -1208,35 +1156,72 @@ const App: React.FC = () => {
       {showTruckManager && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/90 backdrop-blur-md flex flex-col justify-end p-4">
            <div className="bg-white rounded-[2.5rem] p-8 space-y-6 w-full max-w-md mx-auto shadow-2xl animate-in slide-in-from-bottom-10">
-              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">LKW-Fuhrpark</h3><button onClick={() => setShowTruckManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
+              <div className="flex justify-between items-center"><h3 className="text-xl font-black italic uppercase text-slate-900">Fuhrpark</h3><button onClick={() => setShowTruckManager(false)} className="text-slate-300"><Icons.Plus className="rotate-45 w-8 h-8" /></button></div>
               <div className="space-y-3 max-h-[35vh] overflow-y-auto pr-1">
                 {state.trucks.map(t => (
                     <div key={t.id} onClick={() => setState(p => ({...p, activeTruckId: t.id}))} className={`flex items-center gap-3 p-4 rounded-2xl border transition-all ${state.activeTruckId === t.id ? 'bg-amber-50 border-amber-500 shadow-md ring-2 ring-amber-200' : 'bg-white border-slate-200'}`}>
                         <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${state.activeTruckId === t.id ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-400'}`}><Icons.Truck className="w-6 h-6" /></div>
                         <div className="flex-1">
-                          <p className="font-black uppercase text-sm text-slate-900 leading-none mb-1">{t.name}</p>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t.volume}m³ {t.plate ? `• ${t.plate}` : ''}</p>
+                          <p className="font-black uppercase text-sm leading-none mb-1">{t.name}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{t.volume}m³</p>
                         </div>
-                        {state.activeTruckId === t.id && <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></div>}
                         <button onClick={(e) => {e.stopPropagation(); handleDeleteTruck(t.id);}} className="text-red-400 p-2"><Icons.Trash className="w-5 h-5" /></button>
                     </div>
                 ))}
-              </div>
-              <div className="pt-4 border-t border-slate-100 space-y-4">
-                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">LKW hinzufügen</p>
-                 <div className="space-y-2">
-                    <input type="text" value={newTruckData.name} onChange={e => setNewTruckData({...newTruckData, name: e.target.value})} placeholder="NAME (Z.B. MEIN MAN 3-ACHSER)..." className="w-full bg-slate-100 p-3 rounded-xl font-black uppercase text-sm outline-none focus:ring-2 focus:ring-amber-500" />
-                    <div className="flex gap-2">
-                      <input type="text" value={newTruckData.plate} onChange={e => setNewTruckData({...newTruckData, plate: e.target.value})} placeholder="KENNZEICHEN..." className="flex-1 bg-slate-100 p-3 rounded-xl font-black uppercase text-xs outline-none focus:ring-2 focus:ring-amber-500" />
-                      <input type="number" step="0.5" value={newTruckData.volume} onChange={e => setNewTruckData({...newTruckData, volume: e.target.value})} placeholder="m³" className="w-24 bg-slate-100 p-3 rounded-xl font-black text-center text-sm outline-none focus:ring-2 focus:ring-amber-500" />
-                    </div>
-                    <button onClick={handleAddTruck} className="w-full bg-amber-500 text-white p-4 rounded-xl shadow-lg active:scale-95 transition-all font-black uppercase text-xs">Fahrzeug Speichern</button>
-                 </div>
               </div>
               <button onClick={() => setShowTruckManager(false)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Schliessen</button>
            </div>
         </div>
       )}
+
+      {editingSite && (
+          <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
+            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500">
+               <h3 className="text-xl font-black italic uppercase text-slate-900 flex items-center gap-2"><Icons.Building className="text-amber-500" /> Baustelle verwalten</h3>
+               <div className="space-y-4">
+                 <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Name ändern</label><input defaultValue={state.sites.find(s => s.id === editingSite)?.name} onBlur={(e) => handleRenameSite(editingSite, e.target.value)} placeholder="NAME..." className="w-full bg-slate-100 p-4 rounded-2xl font-black text-lg uppercase outline-none focus:ring-4 focus:ring-amber-500/20" /></div>
+               </div>
+               <button onClick={() => { setEditingSite(null); }} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm">Fertig</button>
+            </div>
+          </div>
+        )}
+
+        {editingPoint && editingPointData && (
+          <div className="fixed inset-0 z-[4500] bg-slate-900/90 backdrop-blur-md flex items-center justify-center p-6">
+            <div className="bg-white rounded-[2rem] p-8 space-y-6 w-full max-w-sm shadow-2xl border-4 border-amber-500 overflow-y-auto max-h-[90vh]">
+              <div className="flex justify-between items-start">
+                  <div><h3 className="text-xl font-black italic uppercase text-slate-900">Bagger verwalten</h3><p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-1">Einstellungen anpassen</p></div>
+              </div>
+              <div className="space-y-4">
+                <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bagger-Radius</label><span className="text-sm font-black text-amber-600 bg-amber-50 px-3 py-1 rounded-lg">{(editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT)}m</span></div>
+                  <input type="range" min="10" max="150" step="5" value={editingPointData.radius || LOADING_ZONE_RADIUS_DEFAULT} onChange={(e) => handleUpdatePointRadius(editingPoint.siteId, editingPoint.pointId, parseInt(e.target.value))} className="w-full h-3 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500" />
+                </div>
+                
+                <div className="space-y-2">
+                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Material ändern</label>
+                   <div className="grid grid-cols-1 gap-2 max-h-[30vh] overflow-y-auto pr-1">
+                    {state.materials.map(m => (
+                      <button 
+                        key={m.id} 
+                        onClick={() => handleChangePointMaterial(editingPoint.siteId, editingPoint.pointId, m.name)} 
+                        className={`w-full p-4 rounded-xl text-white font-black text-sm text-left flex justify-between items-center transition-all ${m.name === editingPointData.material ? `${m.colorClass} shadow-lg ring-2 ring-white ring-offset-1 scale-[1.02]` : 'bg-slate-300 opacity-60'}`}
+                      >
+                        <span>{m.name.toUpperCase()}</span>
+                        {m.name === editingPointData.material && <div className="w-2.5 h-2.5 rounded-full bg-white shadow-sm animate-pulse"></div>}
+                      </button>
+                    ))}
+                   </div>
+                </div>
+              </div>
+
+              <div className="pt-2 space-y-2">
+                <button onClick={() => setEditingPoint(null)} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase text-sm shadow-lg active:scale-95 transition-all">Fertig</button>
+                <button onClick={() => handleDeletePoint(editingPoint.siteId, editingPoint.pointId)} className="w-full py-4 text-red-500 font-black uppercase text-xs flex items-center justify-center gap-2 hover:bg-red-50 rounded-xl transition-colors"><Icons.Trash className="w-4 h-4"/> Bagger entfernen</button>
+              </div>
+            </div>
+          </div>
+        )}
 
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/95 backdrop-blur-xl border-t border-slate-200 shadow-2xl grid grid-cols-4 px-2 safe-bottom z-[2500] shrink-0">
         <TabButton id="track" icon={Icons.MapPin} label="Karte" />
@@ -1249,4 +1234,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-

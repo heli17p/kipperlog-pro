@@ -58,4 +58,3 @@ export interface AppState {
   autoDetectEnabled: boolean;
   autoCountEnabled: boolean;
 }
-
